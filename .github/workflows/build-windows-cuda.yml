@@ -92,7 +92,7 @@ jobs:
         run: npm ci
 
       - name: Build Tauri app
-        run: npm run tauri build -- --target ${{ env.TARGET_TRIPLET }}
+        run: npm run tauri build -- --config src-tauri/tauri.windows.conf.json --target ${{ env.TARGET_TRIPLET }}
 
       - name: Upload artifacts
         if: always()

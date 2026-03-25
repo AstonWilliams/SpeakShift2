@@ -49,6 +49,10 @@
       "binaries/ffmpeg",
       "binaries/nllb-translation",
       "binaries/yt-dlp"
+    ],
+    "resources": [
+      "binaries/onnx_runtime",
+      "binaries/whisper"
     ]
   }
 }
