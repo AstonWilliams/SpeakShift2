@@ -34,6 +34,9 @@ jobs:
 
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            src-tauri -> src-tauri/target
 
       - name: Verify HIP/ROCm toolchain on runner
         shell: pwsh
@@ -54,8 +57,8 @@ jobs:
         shell: pwsh
         run: |
           git clone --depth 1 https://github.com/ggml-org/whisper.cpp.git whisper-src
-          cmake -S whisper-src -B whisper-src/build -DCMAKE_BUILD_TYPE=Release -DGGML_HIPBLAS=ON
-          cmake --build whisper-src/build --config Release
+          cmake -S whisper-src -B whisper-src/build -DCMAKE_BUILD_TYPE=Release -DGGML_HIPBLAS=ON -DGGML_NATIVE=OFF
+          cmake --build whisper-src/build --target whisper-cli --config Release
           $whisperCli = Get-ChildItem -Recurse whisper-src/build -Filter whisper-cli.exe | Select-Object -First 1
           if (-not $whisperCli) { throw "whisper-cli.exe not found in whisper build output" }
           Copy-Item $whisperCli.FullName "src-tauri/binaries/whisper/whisper-cli-$env:TARGET_TRIPLET.exe"
