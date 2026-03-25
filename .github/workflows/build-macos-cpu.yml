@@ -60,13 +60,14 @@ jobs:
       - name: Build nllb-translation sidecar
         run: |
           git clone --depth 1 "$NLLB_SOURCE_REPO" nllb-src
-          cd nllb-src
+          cd nllb-src/nllb_build
           cargo build --release
           cd ..
-          NLLB_BIN="$(find nllb-src/target/release -maxdepth 1 -type f \( -name 'nllb-translation' -o -name 'nllb*' \) | head -n 1)"
+          cd ..
+          NLLB_BIN="$(find nllb-src -type f \( -path '*/target/release/nllb-translation' -o -path '*/target/release/nllb*' \) | head -n 1)"
           if [ -z "$NLLB_BIN" ]; then
-            echo "Could not find NLLB release binary under nllb-src/target/release"
-            ls -la nllb-src/target/release || true
+            echo "Could not find NLLB release binary under any nllb-src/**/target/release path"
+            find nllb-src -maxdepth 5 -type d -name release -path '*/target/release' -print || true
             exit 1
           fi
           cp "$NLLB_BIN" "src-tauri/binaries/nllb-translation-${TARGET_TRIPLET}"

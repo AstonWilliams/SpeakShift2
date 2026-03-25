@@ -66,13 +66,14 @@ jobs:
         shell: pwsh
         run: |
           git clone --depth 1 "$env:NLLB_SOURCE_REPO" nllb-src
-          Push-Location nllb-src
+          Push-Location nllb-src/nllb_build
           cargo build --release
           Pop-Location
-          $nllbBin = Get-ChildItem -Path nllb-src/target/release -Filter *.exe | Where-Object { $_.Name -like "nllb*" } | Select-Object -First 1
+          Pop-Location
+          $nllbBin = Get-ChildItem -Recurse -Path nllb-src -Filter *.exe | Where-Object { $_.FullName -match "target[\\/]release" -and $_.Name -like "nllb*" } | Select-Object -First 1
           if (-not $nllbBin) {
-            Write-Host "Could not find NLLB release binary under nllb-src/target/release"
-            Get-ChildItem nllb-src/target/release | Format-Table -AutoSize
+            Write-Host "Could not find NLLB release binary under any nllb-src/**/target/release path"
+            Get-ChildItem -Recurse -Directory nllb-src | Where-Object { $_.FullName -match "target[\\/]release$" } | Select-Object -ExpandProperty FullName
             throw "NLLB binary not found"
           }
           Copy-Item $nllbBin.FullName "src-tauri/binaries/nllb-translation-$env:TARGET_TRIPLET.exe"
