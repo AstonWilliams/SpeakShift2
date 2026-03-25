@@ -1,0 +1,86 @@
+name: Build macOS CPU
+
+permissions:
+  contents: read
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+
+jobs:
+  build-macos-cpu:
+    runs-on: macos-14
+    env:
+      TARGET_TRIPLET: aarch64-apple-darwin
+      NLLB_SOURCE_REPO: ${{ vars.NLLB_SOURCE_REPO || 'https://github.com/Aaron294/nllb-translation.git' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Add Rust target
+        run: rustup target add ${TARGET_TRIPLET}
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install build dependencies
+        run: |
+          brew update
+          brew install cmake ninja pkg-config yasm nasm ffmpeg
+
+      - name: Ensure binaries folders
+        run: |
+          mkdir -p src-tauri/binaries
+          mkdir -p src-tauri/binaries/whisper
+
+      - name: Copy ffmpeg sidecar
+        run: |
+          cp "$(which ffmpeg)" "src-tauri/binaries/ffmpeg-${TARGET_TRIPLET}"
+          chmod +x "src-tauri/binaries/ffmpeg-${TARGET_TRIPLET}"
+
+      - name: Build whisper.cpp sidecar (CPU)
+        run: |
+          git clone --depth 1 https://github.com/ggml-org/whisper.cpp.git whisper-src
+          cmake -S whisper-src -B whisper-src/build -DCMAKE_BUILD_TYPE=Release
+          cmake --build whisper-src/build --config Release -j"$(sysctl -n hw.ncpu)"
+          cp whisper-src/build/bin/whisper-cli "src-tauri/binaries/whisper/whisper-cli-${TARGET_TRIPLET}"
+          chmod +x "src-tauri/binaries/whisper/whisper-cli-${TARGET_TRIPLET}"
+
+      - name: Build nllb-translation sidecar
+        run: |
+          git clone --depth 1 "$NLLB_SOURCE_REPO" nllb-src
+          cargo build --manifest-path nllb-src/Cargo.toml --release
+          cp nllb-src/target/release/nllb-translation "src-tauri/binaries/nllb-translation-${TARGET_TRIPLET}"
+          chmod +x "src-tauri/binaries/nllb-translation-${TARGET_TRIPLET}"
+
+      - name: Download yt-dlp sidecar
+        run: |
+          curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos -o "src-tauri/binaries/yt-dlp-${TARGET_TRIPLET}"
+          chmod +x "src-tauri/binaries/yt-dlp-${TARGET_TRIPLET}"
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Build Tauri app
+        run: npm run tauri build -- --target ${TARGET_TRIPLET}
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: speakshift-macos-cpu
+          path: |
+            src-tauri/binaries/**
+            src-tauri/target/${{ env.TARGET_TRIPLET }}/release/bundle/**
+          if-no-files-found: warn

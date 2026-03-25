@@ -1,0 +1,91 @@
+name: Build Windows ROCm
+
+permissions:
+  contents: read
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+
+jobs:
+  build-windows-rocm:
+    runs-on: [self-hosted, windows, rocm]
+    env:
+      TARGET_TRIPLET: x86_64-pc-windows-msvc
+      NLLB_SOURCE_REPO: ${{ vars.NLLB_SOURCE_REPO || 'https://github.com/Aaron294/nllb-translation.git' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Add Rust target
+        shell: pwsh
+        run: rustup target add $env:TARGET_TRIPLET
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Verify HIP/ROCm toolchain on runner
+        shell: pwsh
+        run: |
+          hipcc --version
+          New-Item -ItemType Directory -Force -Path src-tauri/binaries | Out-Null
+          New-Item -ItemType Directory -Force -Path src-tauri/binaries/whisper | Out-Null
+
+      - name: Download ffmpeg sidecar
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" -OutFile ffmpeg.zip
+          Expand-Archive ffmpeg.zip -DestinationPath ffmpeg-unpack
+          $ff = Get-ChildItem -Recurse ffmpeg-unpack -Filter ffmpeg.exe | Select-Object -First 1
+          Copy-Item $ff.FullName "src-tauri/binaries/ffmpeg-$env:TARGET_TRIPLET.exe"
+
+      - name: Build whisper.cpp sidecar (HIPBLAS)
+        shell: pwsh
+        run: |
+          git clone --depth 1 https://github.com/ggml-org/whisper.cpp.git whisper-src
+          cmake -S whisper-src -B whisper-src/build -DCMAKE_BUILD_TYPE=Release -DGGML_HIPBLAS=ON
+          cmake --build whisper-src/build --config Release
+          $whisperCli = Get-ChildItem -Recurse whisper-src/build -Filter whisper-cli.exe | Select-Object -First 1
+          if (-not $whisperCli) { throw "whisper-cli.exe not found in whisper build output" }
+          Copy-Item $whisperCli.FullName "src-tauri/binaries/whisper/whisper-cli-$env:TARGET_TRIPLET.exe"
+          $dllRoot = Split-Path -Parent $whisperCli.FullName
+          Get-ChildItem "$dllRoot/*.dll" -ErrorAction SilentlyContinue | ForEach-Object { Copy-Item $_.FullName src-tauri/binaries/whisper/ }
+
+      - name: Build nllb-translation sidecar
+        shell: pwsh
+        run: |
+          git clone --depth 1 "$env:NLLB_SOURCE_REPO" nllb-src
+          cargo build --manifest-path nllb-src/Cargo.toml --release
+          Copy-Item nllb-src/target/release/nllb-translation.exe "src-tauri/binaries/nllb-translation-$env:TARGET_TRIPLET.exe"
+
+      - name: Download yt-dlp sidecar
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe" -OutFile "src-tauri/binaries/yt-dlp-$env:TARGET_TRIPLET.exe"
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Build Tauri app
+        run: npm run tauri build -- --target ${{ env.TARGET_TRIPLET }}
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: speakshift-windows-rocm
+          path: |
+            src-tauri/binaries/**
+            src-tauri/target/${{ env.TARGET_TRIPLET }}/release/bundle/**
+          if-no-files-found: warn

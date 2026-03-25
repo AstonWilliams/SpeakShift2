@@ -1,0 +1,942 @@
+// ──────────────────────────────────────────────────────────────
+// Qwen TTS for voice profiling and dubbing
+// ──────────────────────────────────────────────────────────────
+
+#[derive(Serialize)]
+struct QwenVoiceProfileResult {
+    prompt_path: String,
+    output_probe_path: String,
+    model_dir: String,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+struct QwenDubbingRecord {
+    id: String,
+    title: String,
+    text: String,
+    lang: String,
+    prompt_path: String,
+    output_path: String,
+    created_at_ms: u64,
+}
+
+#[derive(Serialize)]
+struct QwenModelStatus {
+    model_dir: String,
+    prompt_dir: String,
+    is_ready: bool,
+    total_files: usize,
+    downloaded_files: usize,
+    missing_files: Vec<String>,
+    supported_languages: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct HfModelMeta {
+    siblings: Option<Vec<HfSibling>>,
+}
+
+#[derive(Deserialize)]
+struct HfSibling {
+    rfilename: String,
+}
+
+const QWEN_MODEL_REPO: &str = "Qwen/Qwen3-TTS-12Hz-0.6B-Base";
+const QWEN_MODEL_FOLDER: &str = "Qwen3-TTS-12Hz-0.6B-Base";
+
+fn get_tts_models_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    let mut dir = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|e| format!("Failed to get app local data dir: {}", e))?;
+    dir.push("tts_models");
+    fs::create_dir_all(&dir).map_err(|e| format!("Failed to create tts_models dir: {}", e))?;
+    Ok(dir)
+}
+
+fn get_qwen_model_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    let mut dir = get_tts_models_dir(app)?;
+    dir.push(QWEN_MODEL_FOLDER);
+    Ok(dir)
+}
+
+fn get_tts_voice_prompts_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    let mut dir = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|e| format!("Failed to get app local data dir: {}", e))?;
+    dir.push("tts_voice_prompts");
+    fs::create_dir_all(&dir).map_err(|e| format!("Failed to create tts_voice_prompts dir: {}", e))?;
+    Ok(dir)
+}
+
+fn qwen_supported_languages() -> Vec<String> {
+    vec![
+        "Chinese".to_string(),
+        "English".to_string(),
+        "Japanese".to_string(),
+        "Korean".to_string(),
+        "German".to_string(),
+        "French".to_string(),
+        "Russian".to_string(),
+        "Portuguese".to_string(),
+        "Spanish".to_string(),
+        "Italian".to_string(),
+    ]
+}
+
+async fn fetch_qwen_model_files() -> Result<Vec<String>, String> {
+    let api_url = format!("https://huggingface.co/api/models/{}", QWEN_MODEL_REPO);
+    let client = Client::builder()
+        .user_agent("SpeakShift-Tauri/0.1.0")
+        .build()
+        .map_err(|e| format!("Failed to build HTTP client: {}", e))?;
+
+    let resp = client
+        .get(&api_url)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to fetch Hugging Face model metadata: {}", e))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("Failed to fetch model metadata: HTTP {}", resp.status()));
+    }
+
+    let body = resp
+        .text()
+        .await
+        .map_err(|e| format!("Failed to read Hugging Face model metadata body: {}", e))?;
+
+    let meta: HfModelMeta = serde_json::from_str(&body)
+        .map_err(|e| format!("Failed to parse Hugging Face model metadata JSON: {}", e))?;
+
+    let mut files = meta
+        .siblings
+        .unwrap_or_default()
+        .into_iter()
+        .map(|s| s.rfilename)
+        .filter(|name: &String| {
+            !name.starts_with('.')
+                && !name.ends_with(".md")
+                && !name.ends_with(".png")
+                && !name.ends_with(".jpg")
+                && !name.ends_with(".jpeg")
+                && !name.ends_with(".gif")
+        })
+        .collect::<Vec<_>>();
+
+    files.sort();
+    files.dedup();
+    Ok(files)
+}
+
+#[tauri::command]
+async fn get_qwen_model_status(app: AppHandle) -> Result<QwenModelStatus, String> {
+    let model_dir = get_qwen_model_dir(&app)?;
+    let prompt_dir = get_tts_voice_prompts_dir(&app)?;
+    let files = fetch_qwen_model_files().await?;
+
+    let mut downloaded = 0usize;
+    let mut missing = Vec::new();
+
+    for file in &files {
+        let path = model_dir.join(file);
+        if path.exists() && path.is_file() {
+            downloaded += 1;
+        } else {
+            missing.push(file.clone());
+        }
+    }
+
+    Ok(QwenModelStatus {
+        model_dir: model_dir.to_string_lossy().to_string(),
+        prompt_dir: prompt_dir.to_string_lossy().to_string(),
+        is_ready: !files.is_empty() && downloaded == files.len(),
+        total_files: files.len(),
+        downloaded_files: downloaded,
+        missing_files: missing,
+        supported_languages: qwen_supported_languages(),
+    })
+}
+
+#[tauri::command]
+async fn download_qwen_model(app: AppHandle) -> Result<QwenModelStatus, String> {
+    let model_dir = get_qwen_model_dir(&app)?;
+    fs::create_dir_all(&model_dir).map_err(|e| format!("Failed to create qwen model dir: {}", e))?;
+
+    let files = fetch_qwen_model_files().await?;
+    if files.is_empty() {
+        return Err("No downloadable files found in Hugging Face repo metadata".to_string());
+    }
+
+    let client = Client::builder()
+        .user_agent("SpeakShift-Tauri/0.1.0")
+        .build()
+        .map_err(|e| format!("Failed to build HTTP client: {}", e))?;
+
+    for (idx, file_name) in files.iter().enumerate() {
+        let target = model_dir.join(file_name);
+
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create qwen model subdir '{}': {}", parent.display(), e))?;
+        }
+
+        if target.exists() && target.is_file() {
+            let percent = (((idx + 1) as f64 / files.len() as f64) * 100.0).round() as u32;
+            let _ = app.emit(
+                "qwen-model-download-progress",
+                json!({
+                    "percent": percent,
+                    "file": file_name,
+                    "index": idx + 1,
+                    "total": files.len(),
+                    "status": "already"
+                }),
+            );
+            continue;
+        }
+
+        let url = format!(
+            "https://huggingface.co/{}/resolve/main/{}",
+            QWEN_MODEL_REPO, file_name
+        );
+
+        let response = client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| format!("Failed downloading '{}': {}", file_name, e))?;
+
+        if !response.status().is_success() {
+            return Err(format!(
+                "Failed downloading '{}': HTTP {}",
+                file_name,
+                response.status()
+            ));
+        }
+
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|e| format!("Failed to read bytes for '{}': {}", file_name, e))?;
+
+        tokio::fs::write(&target, &bytes)
+            .await
+            .map_err(|e| format!("Failed writing '{}': {}", target.display(), e))?;
+
+        let percent = (((idx + 1) as f64 / files.len() as f64) * 100.0).round() as u32;
+        let _ = app.emit(
+            "qwen-model-download-progress",
+            json!({
+                "percent": percent,
+                "file": file_name,
+                "index": idx + 1,
+                "total": files.len(),
+                "status": "downloading"
+            }),
+        );
+    }
+
+    get_qwen_model_status(app).await
+}
+
+#[tauri::command]
+async fn delete_qwen_model(app: AppHandle) -> Result<QwenModelStatus, String> {
+    let model_dir = get_qwen_model_dir(&app)?;
+    if model_dir.exists() {
+        tokio::fs::remove_dir_all(&model_dir)
+            .await
+            .map_err(|e| format!("Failed to delete qwen model dir: {}", e))?;
+    }
+    fs::create_dir_all(&model_dir).map_err(|e| format!("Failed to recreate qwen model dir: {}", e))?;
+    get_qwen_model_status(app).await
+}
+
+fn get_qwen3tts_cli_path(app: &AppHandle) -> Result<PathBuf, String> {
+    get_sidecar_path(
+        app,
+        "qwen3tts-cli",
+        "x86_64-pc-windows-msvc.exe",
+        "x86_64-unknown-linux-gnu",
+        "aarch64-apple-darwin",
+    )
+}
+
+fn map_lang_for_qwen(lang: Option<String>) -> String {
+    match lang.unwrap_or_else(|| "english".to_string()).to_lowercase().as_str() {
+        "zh" | "chinese" => "chinese".to_string(),
+        "en" | "english" => "english".to_string(),
+        "ja" | "japanese" => "japanese".to_string(),
+        "ko" | "korean" => "korean".to_string(),
+        "de" | "german" => "german".to_string(),
+        "fr" | "french" => "french".to_string(),
+        "ru" | "russian" => "russian".to_string(),
+        "es" | "spanish" => "spanish".to_string(),
+        "pt" | "portuguese" => "portuguese".to_string(),
+        "it" | "italian" => "italian".to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn resolve_qwen_model_dir(app: &AppHandle, model_dir: Option<String>) -> Result<PathBuf, String> {
+    if let Some(dir) = model_dir {
+        let p = PathBuf::from(&dir);
+        if !p.exists() {
+            return Err(format!("Qwen model dir does not exist: {}", dir));
+        }
+        return Ok(p);
+    }
+
+    let local_managed = get_qwen_model_dir(app)?;
+    if local_managed.exists() {
+        let has_any_file = fs::read_dir(&local_managed)
+            .map_err(|e| format!("Failed to read qwen model dir: {}", e))?
+            .flatten()
+            .any(|e| e.path().is_file() || e.path().is_dir());
+        if has_any_file {
+            return Ok(local_managed);
+        }
+    }
+
+    if let Ok(env_dir) = std::env::var("QWEN3TTS_MODEL_DIR") {
+        let p = PathBuf::from(&env_dir);
+        if p.exists() {
+            return Ok(p);
+        }
+    }
+
+    let fallback = PathBuf::from("F:/qwen3tts/Qwen3-TTS-12Hz-0.6B-Base");
+    if fallback.exists() {
+        return Ok(fallback);
+    }
+
+    Err("Qwen model directory not found. Pass modelDir from UI or set QWEN3TTS_MODEL_DIR.".to_string())
+}
+
+#[tauri::command]
+async fn create_qwen_voice_profile(
+    app: AppHandle,
+    voice_name: String,
+    reference_audio_path: Option<String>,
+    reference_blob: Option<Vec<u8>>,
+    source_ext: Option<String>,
+    reference_text: Option<String>,
+    language: Option<String>,
+    model_dir: Option<String>,
+    force_cpu: Option<bool>,
+    task_id: Option<String>,
+) -> Result<QwenVoiceProfileResult, String> {
+    let emit_progress = |percent: u32, stage: &str, message: &str| {
+        let _ = app.emit(
+            "qwen-voice-progress",
+            json!({
+                "taskId": task_id,
+                "percent": percent,
+                "stage": stage,
+                "message": message,
+            }),
+        );
+    };
+
+    emit_progress(5, "validate", "Validating reference input");
+
+    let reference_path = if let Some(path) = reference_audio_path {
+        let p = PathBuf::from(&path);
+        if !p.exists() {
+            return Err(format!("Reference audio file does not exist: {}", path));
+        }
+        path
+    } else if let Some(blob) = reference_blob {
+        if blob.is_empty() {
+            return Err("Reference blob is empty".to_string());
+        }
+
+        let mut dir = app
+            .path()
+            .app_local_data_dir()
+            .map_err(|e| format!("Failed to get app local data dir: {}", e))?;
+        dir.push("qwen_references");
+        fs::create_dir_all(&dir)
+            .map_err(|e| format!("Failed to create qwen_references dir: {}", e))?;
+
+        let ext = source_ext
+            .unwrap_or_else(|| "wav".to_string())
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .collect::<String>();
+        let safe_ext = if ext.is_empty() { "wav".to_string() } else { ext };
+
+        let out_path = dir.join(format!("qwen_ref_{}.{}", Uuid::new_v4(), safe_ext));
+        fs::write(&out_path, blob).map_err(|e| format!("Failed to write reference blob: {}", e))?;
+        out_path.to_string_lossy().to_string()
+    } else {
+        return Err("Reference audio path or blob is required".to_string());
+    };
+
+    let cli_path = get_qwen3tts_cli_path(&app)?;
+    let resolved_model_dir = resolve_qwen_model_dir(&app, model_dir)?;
+    emit_progress(20, "prepare", "Preparing prompt output files");
+
+    let out_dir = get_tts_voice_prompts_dir(&app)?;
+
+    let safe_name = voice_name
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect::<String>();
+
+    let prompt_path = out_dir.join(format!("{}_{}.safetensors", safe_name, Uuid::new_v4()));
+    let probe_path = out_dir.join(format!("{}_probe_{}.wav", safe_name, Uuid::new_v4()));
+
+    let use_cpu = force_cpu.unwrap_or(false);
+    let device = if use_cpu { "cpu" } else { "cuda" };
+    let dtype = if use_cpu { "f32" } else { "bf16" };
+
+    let mut args: Vec<String> = vec![
+        "--model-dir".to_string(),
+        resolved_model_dir.to_string_lossy().to_string(),
+        "--text".to_string(),
+        "This is a saved voice profile probe from SpeakShift.".to_string(),
+        "--ref-audio".to_string(),
+        reference_path,
+        "--language".to_string(),
+        map_lang_for_qwen(language),
+        "--save-prompt".to_string(),
+        prompt_path.to_string_lossy().to_string(),
+        "--output".to_string(),
+        probe_path.to_string_lossy().to_string(),
+        "--device".to_string(),
+        device.to_string(),
+        "--dtype".to_string(),
+        dtype.to_string(),
+    ];
+
+    if let Some(rt) = reference_text {
+        if !rt.trim().is_empty() {
+            args.push("--ref-text".to_string());
+            args.push(rt);
+        }
+    }
+
+    emit_progress(45, "run", "Running qwen3tts-cli for voice profile");
+
+    let output = TokioCommand::new(&cli_path)
+        .current_dir(cli_path.parent().unwrap_or(Path::new(".")))
+        .args(args)
+        .output()
+        .await
+        .map_err(|e| format!("Failed to execute qwen3tts-cli: {}", e))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+    if !output.status.success() {
+        return Err(format!("qwen3tts-cli failed:\n{}\n{}", stderr, stdout));
+    }
+
+    emit_progress(85, "verify", "Verifying generated prompt and probe");
+
+    if !prompt_path.exists() {
+        return Err(format!(
+            "Prompt profile was not created: {}\nstdout:\n{}\nstderr:\n{}",
+            prompt_path.display(),
+            stdout,
+            stderr
+        ));
+    }
+
+    if !probe_path.exists() {
+        return Err(format!(
+            "Probe audio was not created: {}\nstdout:\n{}\nstderr:\n{}",
+            probe_path.display(),
+            stdout,
+            stderr
+        ));
+    }
+
+    emit_progress(100, "done", "Voice profile created");
+
+    Ok(QwenVoiceProfileResult {
+        prompt_path: prompt_path.to_string_lossy().to_string(),
+        output_probe_path: probe_path.to_string_lossy().to_string(),
+        model_dir: resolved_model_dir.to_string_lossy().to_string(),
+    })
+}
+
+fn get_qwen_dubbings_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    let mut dir = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|e| format!("Failed to get app local data dir: {}", e))?;
+    dir.push("qwen_dubbings");
+    fs::create_dir_all(&dir).map_err(|e| format!("Failed to create qwen_dubbings dir: {}", e))?;
+    Ok(dir)
+}
+
+fn get_qwen_dubbings_manifest_path(app: &AppHandle) -> Result<PathBuf, String> {
+    let dir = get_qwen_dubbings_dir(app)?;
+    Ok(dir.join("manifest.json"))
+}
+
+fn read_qwen_dubbings_manifest(app: &AppHandle) -> Result<Vec<QwenDubbingRecord>, String> {
+    let manifest = get_qwen_dubbings_manifest_path(app)?;
+    if !manifest.exists() {
+        return Ok(Vec::new());
+    }
+
+    let content = fs::read_to_string(&manifest)
+        .map_err(|e| format!("Failed to read dubbings manifest: {}", e))?;
+    if content.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+
+    serde_json::from_str::<Vec<QwenDubbingRecord>>(&content)
+        .map_err(|e| format!("Failed to parse dubbings manifest: {}", e))
+}
+
+fn write_qwen_dubbings_manifest(app: &AppHandle, records: &[QwenDubbingRecord]) -> Result<(), String> {
+    let manifest = get_qwen_dubbings_manifest_path(app)?;
+    let json = serde_json::to_string_pretty(records)
+        .map_err(|e| format!("Failed to serialize dubbings manifest: {}", e))?;
+    fs::write(&manifest, json).map_err(|e| format!("Failed to write dubbings manifest: {}", e))
+}
+
+#[tauri::command]
+fn list_qwen_dubbings(app: AppHandle) -> Result<Vec<QwenDubbingRecord>, String> {
+    let mut records = read_qwen_dubbings_manifest(&app)?;
+    records.sort_by(|a, b| b.created_at_ms.cmp(&a.created_at_ms));
+    Ok(records)
+}
+
+#[tauri::command]
+async fn create_qwen_dubbing(
+    app: AppHandle,
+    title: Option<String>,
+    text: String,
+    lang: Option<String>,
+    prompt_path: String,
+    model_dir: Option<String>,
+    force_cpu: Option<bool>,
+    task_id: Option<String>,
+) -> Result<QwenDubbingRecord, String> {
+    let emit_progress = |percent: u32, stage: &str, message: &str| {
+        let _ = app.emit(
+            "qwen-dubbing-progress",
+            json!({
+                "taskId": task_id,
+                "percent": percent,
+                "stage": stage,
+                "message": message,
+            }),
+        );
+    };
+
+    emit_progress(5, "validate", "Validating dubbing input");
+
+    let trimmed_text = text.trim().to_string();
+    if trimmed_text.is_empty() {
+        return Err("Dubbing text cannot be empty".to_string());
+    }
+
+    let final_lang = map_lang_for_qwen(lang);
+
+    let prompt = PathBuf::from(&prompt_path);
+    if !prompt.exists() {
+        return Err(format!("Prompt path does not exist: {}", prompt_path));
+    }
+
+    let resolved_model_dir = resolve_qwen_model_dir(&app, model_dir)?;
+    emit_progress(20, "prepare", "Preparing dubbing output path");
+
+    let use_cpu = force_cpu.unwrap_or(false);
+    let device = if use_cpu { "cpu" } else { "cuda" };
+    let dtype = if use_cpu { "f32" } else { "bf16" };
+
+    let mut out_dir = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|e| format!("Failed to get app local data dir: {}", e))?;
+    out_dir.push("qwen_tts_outputs");
+    fs::create_dir_all(&out_dir).map_err(|e| format!("Failed to create qwen_tts_outputs dir: {}", e))?;
+
+    let output_path = out_dir.join(format!("qwen_dubbing_{}.wav", Uuid::new_v4()));
+
+    let cli_path = get_qwen3tts_cli_path(&app)?;
+    let args: Vec<String> = vec![
+        "--model-dir".to_string(),
+        resolved_model_dir.to_string_lossy().to_string(),
+        "--text".to_string(),
+        trimmed_text.clone(),
+        "--load-prompt".to_string(),
+        prompt_path.clone(),
+        "--language".to_string(),
+        final_lang.clone(),
+        "--output".to_string(),
+        output_path.to_string_lossy().to_string(),
+        "--device".to_string(),
+        device.to_string(),
+        "--dtype".to_string(),
+        dtype.to_string(),
+    ];
+
+    emit_progress(45, "run", "Running qwen3tts-cli dubbing synthesis");
+
+    let output = TokioCommand::new(&cli_path)
+        .current_dir(cli_path.parent().unwrap_or(Path::new(".")))
+        .args(args)
+        .output()
+        .await
+        .map_err(|e| format!("Failed to execute qwen3tts-cli for dubbing: {}", e))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+    if !output.status.success() {
+        return Err(format!("qwen3tts-cli dubbing failed:\n{}\n{}", stderr, stdout));
+    }
+
+    emit_progress(85, "verify", "Verifying generated dubbing audio");
+
+    if !output_path.exists() {
+        return Err(format!("Dubbing output was not created: {}", output_path.display()));
+    }
+
+    let generated_title = {
+        let fallback = if trimmed_text.len() > 48 {
+            format!("{}...", &trimmed_text[..48])
+        } else {
+            trimmed_text.clone()
+        };
+        title.unwrap_or(fallback).trim().to_string()
+    };
+
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| format!("Failed to compute timestamp: {}", e))?
+        .as_millis() as u64;
+
+    let record = QwenDubbingRecord {
+        id: Uuid::new_v4().to_string(),
+        title: if generated_title.is_empty() {
+            "Untitled dubbing".to_string()
+        } else {
+            generated_title
+        },
+        text: trimmed_text,
+        lang: final_lang,
+        prompt_path,
+        output_path: output_path.to_string_lossy().to_string(),
+        created_at_ms: now_ms,
+    };
+
+    let mut records = read_qwen_dubbings_manifest(&app)?;
+    records.push(record.clone());
+    write_qwen_dubbings_manifest(&app, &records)?;
+
+    emit_progress(100, "done", "Dubbing created");
+
+    Ok(record)
+}
+
+#[tauri::command]
+async fn synthesize_qwen_preview(
+    app: AppHandle,
+    prompt_path: String,
+    text: Option<String>,
+    lang: Option<String>,
+    model_dir: Option<String>,
+    force_cpu: Option<bool>,
+) -> Result<String, String> {
+    let prompt = PathBuf::from(&prompt_path);
+    if !prompt.exists() {
+        return Err(format!("Prompt path does not exist: {}", prompt_path));
+    }
+
+    let resolved_model_dir = resolve_qwen_model_dir(&app, model_dir)?;
+    let final_text = text
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "This is a quick voice preview from SpeakShift.".to_string());
+    let final_lang = map_lang_for_qwen(lang);
+
+    let use_cpu = force_cpu.unwrap_or(false);
+    let device = if use_cpu { "cpu" } else { "cuda" };
+    let dtype = if use_cpu { "f32" } else { "bf16" };
+
+    let mut out_dir = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|e| format!("Failed to get app local data dir: {}", e))?;
+    out_dir.push("qwen_tts_outputs");
+    fs::create_dir_all(&out_dir).map_err(|e| format!("Failed to create qwen_tts_outputs dir: {}", e))?;
+
+    let output_path = out_dir.join(format!("qwen_preview_{}.wav", Uuid::new_v4()));
+    let cli_path = get_qwen3tts_cli_path(&app)?;
+
+    let args: Vec<String> = vec![
+        "--model-dir".to_string(),
+        resolved_model_dir.to_string_lossy().to_string(),
+        "--text".to_string(),
+        final_text,
+        "--load-prompt".to_string(),
+        prompt_path,
+        "--language".to_string(),
+        final_lang,
+        "--output".to_string(),
+        output_path.to_string_lossy().to_string(),
+        "--device".to_string(),
+        device.to_string(),
+        "--dtype".to_string(),
+        dtype.to_string(),
+    ];
+
+    let output = TokioCommand::new(&cli_path)
+        .current_dir(cli_path.parent().unwrap_or(Path::new(".")))
+        .args(args)
+        .output()
+        .await
+        .map_err(|e| format!("Failed to execute qwen3tts-cli preview: {}", e))?;
+
+    if !output.status.success() {
+        return Err(format!(
+            "qwen3tts-cli preview failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stderr),
+            String::from_utf8_lossy(&output.stdout)
+        ));
+    }
+
+    if !output_path.exists() {
+        return Err(format!("Preview output was not created: {}", output_path.display()));
+    }
+
+    Ok(output_path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+fn read_artifact_bytes(path: String) -> Result<Vec<u8>, String> {
+    let pb = PathBuf::from(&path);
+    if !pb.exists() {
+        return Err(format!("Artifact file does not exist: {}", path));
+    }
+    fs::read(&pb).map_err(|e| format!("Failed to read artifact bytes: {}", e))
+}
+
+fn get_sidecar_path(
+    app: &AppHandle,
+    base_name: &str,                // e.g. "ffmpeg", "whisper-cli", "yt-dlp", "nllb-translation"
+    windows_suffix: &str,           // e.g. "x86_64-pc-windows-msvc.exe"
+    linux_suffix: &str,             // e.g. "x86_64-unknown-linux-gnu"
+    macos_suffix: &str,             // e.g. "x86_64-apple-darwin" or "aarch64-apple-darwin"
+) -> Result<PathBuf, String> {
+    println!("[SIDECAR] Looking for '{}'", base_name);
+
+    // Helper that takes &Path (works with both PathBuf and &Path)
+    let check = |path: &Path, label: &str| -> Option<PathBuf> {
+        if path.exists() && path.is_file() {
+            println!("[SIDECAR] Found {} at: {}", label, path.display());
+            Some(path.to_path_buf())
+        } else {
+            println!("[SIDECAR] Not found at {}: {}", label, path.display());
+            None
+        }
+    };
+
+    // ────────────────────────────────────────────────
+    // 1. Next to the executable (very common in dev & some Windows bundles)
+    // ────────────────────────────────────────────────
+    let exe_dir = match std::env::current_exe() {
+        Ok(path) => match path.parent() {
+            Some(dir) => dir.to_path_buf(),
+            None => return Err("Cannot get parent directory of executable".to_string()),
+        },
+        Err(e) => return Err(format!("Cannot get current executable path: {}", e)),
+    };
+
+    let exe_candidates: Vec<PathBuf> = if cfg!(debug_assertions) {
+        vec![exe_dir.join(base_name)]
+    } else if cfg!(target_os = "windows") {
+        vec![
+            exe_dir.join(format!("{}.exe", base_name)),
+            exe_dir.join(format!("{}-{}", base_name, windows_suffix)),
+        ]
+    } else if cfg!(target_os = "linux") {
+        vec![
+            exe_dir.join(base_name),
+            exe_dir.join(format!("{}-{}", base_name, linux_suffix)),
+        ]
+    } else { // macOS
+        vec![
+            exe_dir.join(base_name),
+            exe_dir.join(format!("{}-{}", base_name, macos_suffix)),
+        ]
+    };
+
+    for candidate in &exe_candidates {
+        if let Some(p) = check(candidate, "next to exe") {
+            return Ok(p);
+        }
+    }
+
+    // ────────────────────────────────────────────────
+    // 2. Resources directory — standard Tauri bundled location
+    // ────────────────────────────────────────────────
+    let res_dir = match app.path().resource_dir() {
+        Ok(dir) => dir,
+        Err(e) => return Err(format!("Cannot get resource directory: {}", e)),
+    };
+
+    println!("[SIDECAR] Resources dir: {}", res_dir.display());
+
+    let res_candidates: Vec<String> = if cfg!(target_os = "windows") {
+        vec![
+            format!("{}-{}", base_name, windows_suffix),
+            format!("{}.exe", base_name),
+            format!("binaries/{}-{}", base_name, windows_suffix),
+            format!("binaries/{}.exe", base_name),
+        ]
+    } else if cfg!(target_os = "linux") {
+        vec![
+            format!("{}-{}", base_name, linux_suffix),
+            base_name.to_string(),
+            format!("binaries/{}-{}", base_name, linux_suffix),
+            format!("binaries/{}", base_name),
+        ]
+    } else { // macOS
+        vec![
+            format!("{}-{}", base_name, macos_suffix),
+            base_name.to_string(),
+            format!("binaries/{}-{}", base_name, macos_suffix),
+            format!("binaries/{}", base_name),
+        ]
+    };
+
+    for rel_path in &res_candidates {
+        let full_path = res_dir.join(rel_path);
+        if let Some(p) = check(&full_path, "resources") {
+            return Ok(p);
+        }
+    }
+
+    // ────────────────────────────────────────────────
+    // 3. Platform-specific fallbacks
+    // ────────────────────────────────────────────────
+    if cfg!(target_os = "linux") {
+        let system_paths = [
+            format!("/usr/bin/{}", base_name),
+            format!("/usr/local/bin/{}", base_name),
+        ];
+
+        for sys_path_str in system_paths {
+            let sys_path = Path::new(&sys_path_str);
+            if let Some(p) = check(sys_path, "system path") {
+                return Ok(p);
+            }
+        }
+    }
+
+    // macOS: no common extra system path fallback (Gatekeeper usually prevents this anyway)
+
+    // ────────────────────────────────────────────────
+    // Final detailed error message
+    // ────────────────────────────────────────────────
+    Err(format!(
+        "Sidecar '{}' not found on {}.\n\
+         • Tried next to exe:\n  {}\n\
+         • Tried in resources ({}):\n  {}\n\
+         • Linux system paths (if applicable): /usr/bin/{} , /usr/local/bin/{}\n\
+         • Recommendation: Prefer Command::new_sidecar(\"{}\") — it resolves automatically",
+        base_name,
+        if cfg!(target_os = "windows") {
+            "Windows"
+        } else if cfg!(target_os = "linux") {
+            "Linux"
+        } else {
+            "macOS"
+        },
+        exe_candidates.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join("\n  "),
+        res_dir.display(),
+        res_candidates.join("\n  "),
+        base_name,
+        base_name,
+        base_name
+    ))
+}
+
+fn main() {
+    tauri::Builder::default()
+        .plugin(tauri_plugin_fs::init())
+        .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_sql::Builder::default().build())
+        .plugin(tauri_plugin_dialog::init())
+        .setup(|app| {
+            let handle = app.app_handle();
+            let resource_dir = handle
+                .path()
+                .resource_dir()
+                .expect("failed to get resource directory");
+
+            // ─── ONNX Runtime loading preparation (Windows version) ───
+            // Point ORT directly to onnxruntime.dll in the resources root
+            let ort_dll_path = resource_dir.join("onnxruntime.dll");
+
+            // Must exist — otherwise ort will fall back to system PATH / System32 → wrong version!
+            if !ort_dll_path.exists() {
+                eprintln!("ERROR: onnxruntime.dll not found in resources: {:?}", ort_dll_path);
+                // You can also show a dialog here if you want
+            }
+
+            // Tell ort where to load the main DLL from (required when using load-dynamic)
+            env::set_var("ORT_DYLIB_PATH", ort_dll_path);
+
+            // Optional: debug (visible when running `tauri dev` or in console of built app)
+            println!("ORT_DYLIB_PATH set to: {:?}", env::var("ORT_DYLIB_PATH").ok());
+            println!("Resources dir       : {:?}", resource_dir);
+
+            // No LD_LIBRARY_PATH needed on Windows
+
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![
+            download_youtube_video,
+            ensure_whisper_model,
+            transcribe_wav,
+            transcribe_media,
+            delete_whisper_model,
+            download_youtube_audio,
+            transcribe_youtube,
+            get_file_size,
+            transcribe_path,
+            list_downloaded_models,
+            list_downloaded_diar_models,
+            set_active_diar_model,
+            ensure_diarization_model,
+            delete_diarization_model,
+            diarize_speakers,
+            serve_audio_file,
+            save_temp_audio,
+            transcribe_recording,
+            process_ffmpeg,
+            get_processed_file_bytes,
+            save_processed_file,
+            create_video_preview,
+            list_downloaded_nllb_models,
+            set_active_nllb_model,
+            get_active_nllb_model,
+            ensure_nllb_model,
+            delete_nllb_model,
+            download_nllb_model,
+            translate_text,
+            get_temp_dir,
+            get_qwen_model_status,
+            download_qwen_model,
+            delete_qwen_model,
+            create_qwen_voice_profile,
+            synthesize_qwen_preview,
+            list_qwen_dubbings,
+            create_qwen_dubbing,
+            read_artifact_bytes,
+            normalize_audio_for_preview,
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running tauri application");
+}
