@@ -13,7 +13,7 @@ jobs:
     runs-on: macos-14
     env:
       TARGET_TRIPLET: aarch64-apple-darwin
-      NLLB_SOURCE_REPO: ${{ vars.NLLB_SOURCE_REPO || 'https://github.com/Aaron294/nllb-translation.git' }}
+      NLLB_SOURCE_REPO: https://github.com/AstonWilliams/Metal-CoreMLwhisper.cpp-build.git
 
     steps:
       - name: Checkout
@@ -60,8 +60,16 @@ jobs:
       - name: Build nllb-translation sidecar
         run: |
           git clone --depth 1 "$NLLB_SOURCE_REPO" nllb-src
-          cargo build --manifest-path nllb-src/Cargo.toml --release
-          cp nllb-src/target/release/nllb-translation "src-tauri/binaries/nllb-translation-${TARGET_TRIPLET}"
+          cd nllb-src
+          cargo build --release
+          cd ..
+          NLLB_BIN="$(find nllb-src/target/release -maxdepth 1 -type f \( -name 'nllb-translation' -o -name 'nllb*' \) | head -n 1)"
+          if [ -z "$NLLB_BIN" ]; then
+            echo "Could not find NLLB release binary under nllb-src/target/release"
+            ls -la nllb-src/target/release || true
+            exit 1
+          fi
+          cp "$NLLB_BIN" "src-tauri/binaries/nllb-translation-${TARGET_TRIPLET}"
           chmod +x "src-tauri/binaries/nllb-translation-${TARGET_TRIPLET}"
 
       - name: Download yt-dlp sidecar

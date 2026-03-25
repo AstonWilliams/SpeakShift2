@@ -13,7 +13,7 @@ jobs:
     runs-on: [self-hosted, windows, rocm]
     env:
       TARGET_TRIPLET: x86_64-pc-windows-msvc
-      NLLB_SOURCE_REPO: ${{ vars.NLLB_SOURCE_REPO || 'https://github.com/Aaron294/nllb-translation.git' }}
+      NLLB_SOURCE_REPO: https://github.com/AstonWilliams/Metal-CoreMLwhisper.cpp-build.git
 
     steps:
       - name: Checkout
@@ -66,8 +66,16 @@ jobs:
         shell: pwsh
         run: |
           git clone --depth 1 "$env:NLLB_SOURCE_REPO" nllb-src
-          cargo build --manifest-path nllb-src/Cargo.toml --release
-          Copy-Item nllb-src/target/release/nllb-translation.exe "src-tauri/binaries/nllb-translation-$env:TARGET_TRIPLET.exe"
+          Push-Location nllb-src
+          cargo build --release
+          Pop-Location
+          $nllbBin = Get-ChildItem -Path nllb-src/target/release -Filter *.exe | Where-Object { $_.Name -like "nllb*" } | Select-Object -First 1
+          if (-not $nllbBin) {
+            Write-Host "Could not find NLLB release binary under nllb-src/target/release"
+            Get-ChildItem nllb-src/target/release | Format-Table -AutoSize
+            throw "NLLB binary not found"
+          }
+          Copy-Item $nllbBin.FullName "src-tauri/binaries/nllb-translation-$env:TARGET_TRIPLET.exe"
 
       - name: Download yt-dlp sidecar
         shell: pwsh
