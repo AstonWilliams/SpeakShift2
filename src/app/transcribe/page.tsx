@@ -74,9 +74,7 @@ export default function TranscribePage() {
     }
   };
 
-  if (step >= steps.length) return null;
-
-  const current = steps[step];
+  const current = step < steps.length ? steps[step] : null;
 
   useEffect(() => {
     setMounted(true);
@@ -259,14 +257,16 @@ export default function TranscribePage() {
         <p className="text-xl text-zinc-500 font-medium">{t("AI-transcriber-desc")}</p>
       </header>
 
-      <OnboardingCard
-        id={current.id}
-        title={current.title}
-        description={current.description}
-        imageSrc={current.imageSrc}
-        buttonText={current.buttonText}
-        onFinish={handleNext}
-      />
+      {current && (
+        <OnboardingCard
+          id={current.id}
+          title={current.title}
+          description={current.description}
+          imageSrc={current.imageSrc}
+          buttonText={current.buttonText}
+          onFinish={handleNext}
+        />
+      )}
 
       <main className="max-w-6xl">
         {!hasSelection ? (
@@ -282,7 +282,7 @@ export default function TranscribePage() {
 
             <div
               className={`
-                relative aspect-video lg:aspect-[21/9]
+                relative aspect-video lg:aspect-21/9
                 border-4 border-dashed rounded-[64px]
                 flex flex-col items-center justify-center gap-8
                 transition-all duration-300 cursor-pointer

@@ -16,6 +16,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { showToast } from "@/lib/toast";
 import { useTranslations } from "next-intl";
+import { useTheme } from "next-themes";
 
 const WHISPER_MODELS = [
     "tiny",
@@ -52,6 +53,8 @@ export default function CompactFileTranscriber({
     onSuccess,
 }: CompactFileTranscriberProps) {
     const t = useTranslations();
+    const { resolvedTheme } = useTheme();
+    const isDark = resolvedTheme === "dark";
 
     const [selectedFilePath, setSelectedFilePath] = useState<string | null>(null);
     const [selectedFileName, setSelectedFileName] = useState("No file selected");
@@ -146,7 +149,7 @@ export default function CompactFileTranscriber({
         >
             {/* File selection */}
             <div className="space-y-3">
-                <div className="flex items-center gap-3 bg-zinc-800/60 p-3 rounded-lg">
+                <div className={`flex items-center gap-3 p-3 rounded-lg ${isDark ? "bg-zinc-800/60" : "bg-gray-100"}`}>
                     <Upload className="w-5 h-5 text-zinc-400" />
                     <span className="text-sm truncate flex-1 font-medium">
                         {selectedFileName}
@@ -168,7 +171,9 @@ export default function CompactFileTranscriber({
                 <button
                     onClick={pickFile}
                     disabled={isProcessing}
-                    className="w-full py-3 bg-zinc-700 hover:bg-zinc-600 disabled:opacity-50 rounded-xl font-medium flex items-center justify-center gap-2 transition-colors"
+                    className={`w-full py-3 disabled:opacity-50 rounded-xl font-medium flex items-center justify-center gap-2 transition-colors ${isDark
+                        ? "bg-zinc-700 hover:bg-zinc-600 text-white"
+                        : "bg-gray-200 hover:bg-gray-300 text-gray-900"}`}
                 >
                     <Upload size={18} />
                     {selectedFileName === "No file selected" ? t("chooseFile") : t("changeFile")}
@@ -178,14 +183,16 @@ export default function CompactFileTranscriber({
             {/* Model & Language */}
             <div className="grid grid-cols-2 gap-4">
                 <div>
-                    <label className="block text-sm text-zinc-400 mb-1.5">
+                    <label className={`block text-sm mb-1.5 ${isDark ? "text-zinc-400" : "text-gray-600"}`}>
                         {t("model")}
                     </label>
                     <select
                         value={selectedModel}
                         onChange={(e) => setSelectedModel(e.target.value as ModelType)}
                         disabled={isProcessing}
-                        className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-600"
+                        className={`w-full rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-600 ${isDark
+                            ? "bg-zinc-800 border border-zinc-700 text-white"
+                            : "bg-white border border-gray-300 text-gray-900"}`}
                     >
                         {WHISPER_MODELS.map((m) => (
                             <option key={m} value={m}>
@@ -196,14 +203,16 @@ export default function CompactFileTranscriber({
                 </div>
 
                 <div>
-                    <label className="block text-sm text-zinc-400 mb-1.5">
+                    <label className={`block text-sm mb-1.5 ${isDark ? "text-zinc-400" : "text-gray-600"}`}>
                         {t("language")}
                     </label>
                     <select
                         value={selectedLanguage}
                         onChange={(e) => setSelectedLanguage(e.target.value as LanguageCode)}
                         disabled={isProcessing}
-                        className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-600"
+                        className={`w-full rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-600 ${isDark
+                            ? "bg-zinc-800 border border-zinc-700 text-white"
+                            : "bg-white border border-gray-300 text-gray-900"}`}
                     >
                         {LANGUAGES.map((lang) => (
                             <option key={lang.code} value={lang.code}>
@@ -216,20 +225,22 @@ export default function CompactFileTranscriber({
 
             {/* Status / Error */}
             {error && (
-                <div className="bg-red-900/40 border border-red-700/60 text-red-300 px-4 py-3 rounded-lg text-sm">
+                <div className={`px-4 py-3 rounded-lg text-sm border ${isDark
+                    ? "bg-red-900/40 border-red-700/60 text-red-300"
+                    : "bg-red-50 border-red-200 text-red-700"}`}>
                     {error}
                 </div>
             )}
 
             {isProcessing && (
                 <div className="space-y-2">
-                    <div className="w-full bg-zinc-700 rounded-full h-2.5">
+                    <div className={`w-full rounded-full h-2.5 ${isDark ? "bg-zinc-700" : "bg-gray-200"}`}>
                         <div
                             className="bg-blue-600 h-2.5 rounded-full transition-all duration-300"
                             style={{ width: `${progress}%` }}
                         />
                     </div>
-                    <p className="text-sm text-zinc-400 text-center">{status}</p>
+                    <p className={`text-sm text-center ${isDark ? "text-zinc-400" : "text-gray-600"}`}>{status}</p>
                 </div>
             )}
 
@@ -238,7 +249,9 @@ export default function CompactFileTranscriber({
                 <button
                     onClick={onClose}
                     disabled={isProcessing}
-                    className="flex-1 py-3 bg-zinc-700 hover:bg-zinc-600 disabled:opacity-50 rounded-xl font-medium transition-colors"
+                    className={`flex-1 py-3 disabled:opacity-50 rounded-xl font-medium transition-colors ${isDark
+                        ? "bg-zinc-700 hover:bg-zinc-600 text-white"
+                        : "bg-gray-200 hover:bg-gray-300 text-gray-900"}`}
                 >
                     {t("cancel")}
                 </button>

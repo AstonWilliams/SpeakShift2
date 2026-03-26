@@ -12,6 +12,7 @@ import {
     Edit2,
     FileAudio,
     AlertTriangle,
+    Monitor,
 } from "lucide-react";
 import Link from "next/link";
 import { invoke } from "@tauri-apps/api/core";
@@ -123,6 +124,11 @@ export default function TranscriptionsPage() {
     const [audioChunks, setAudioChunks] = useState<Blob[]>([]);
     const timerRef = useRef<NodeJS.Timeout | null>(null);
     const streamRef = useRef<MediaStream | null>(null);
+    const audioContextRef = useRef<AudioContext | null>(null);
+    const analyserRef = useRef<AnalyserNode | null>(null);
+    const meterRafRef = useRef<number | null>(null);
+    const [recordingLevel, setRecordingLevel] = useState(0);
+    const [waveformBars, setWaveformBars] = useState<number[]>(Array.from({ length: 20 }, () => 6));
 
     // Editing title
     const [editingId, setEditingId] = useState<string | null>(null);
@@ -138,6 +144,8 @@ export default function TranscriptionsPage() {
     const [showRecordingPreview, setShowRecordingPreview] = useState(false);
     const [savedAudioPath, setSavedAudioPath] = useState<string | null>(null);
     const [previewBlob, setPreviewBlob] = useState<Blob | null>(null);
+    const [recordingSource, setRecordingSource] = useState<"microphone" | "system">("microphone");
+    const [recordingModel, setRecordingModel] = useState("ggml-base.en.bin");
     const t = useTranslations();
     const delete_transcription = "Delete transcription";
 
@@ -149,19 +157,126 @@ export default function TranscriptionsPage() {
         }
     };
 
-    if (step >= steps.length) return null;
+    const current = step < steps.length ? steps[step] : null;
 
-    const current = steps[step];
+    const stopAudioMeter = () => {
+        if (meterRafRef.current !== null) {
+            cancelAnimationFrame(meterRafRef.current);
+            meterRafRef.current = null;
+        }
+        analyserRef.current = null;
+        if (audioContextRef.current) {
+            audioContextRef.current.close().catch(() => {
+                // ignore close errors
+            });
+            audioContextRef.current = null;
+        }
+        setRecordingLevel(0);
+        setWaveformBars(Array.from({ length: 20 }, () => 6));
+    };
+
+    const getRecordingModelLabel = (value: string) => {
+        return WHISPER_MODELS.find((m) => m.value === value)?.label || value;
+    };
+
+    const startAudioMeter = async (stream: MediaStream) => {
+        stopAudioMeter();
+
+        const audioContext = new AudioContext();
+        audioContextRef.current = audioContext;
+
+        const sourceNode = audioContext.createMediaStreamSource(stream);
+        const analyser = audioContext.createAnalyser();
+        analyser.fftSize = 256;
+        analyser.smoothingTimeConstant = 0.82;
+        analyserRef.current = analyser;
+        sourceNode.connect(analyser);
+
+        const data = new Uint8Array(analyser.frequencyBinCount);
+        const barsCount = 20;
+
+        const tick = () => {
+            if (!analyserRef.current) return;
+
+            analyserRef.current.getByteFrequencyData(data);
+            const chunkSize = Math.max(1, Math.floor(data.length / barsCount));
+            const bars = Array.from({ length: barsCount }, (_, i) => {
+                const start = i * chunkSize;
+                const end = Math.min(data.length, start + chunkSize);
+                let sum = 0;
+                for (let j = start; j < end; j++) {
+                    sum += data[j];
+                }
+                const avg = end > start ? sum / (end - start) : 0;
+                return Math.max(4, Math.min(26, (avg / 255) * 26));
+            });
+
+            const avgLevel = bars.reduce((acc, h) => acc + h, 0) / bars.length;
+            setRecordingLevel(Math.round((avgLevel / 26) * 100));
+            setWaveformBars(bars);
+            meterRafRef.current = requestAnimationFrame(tick);
+        };
+
+        meterRafRef.current = requestAnimationFrame(tick);
+    };
 
     // ── Start recording ───────────────────────────────────────────────
-    const startRecording = async () => {
+    const startRecording = async (source: "microphone" | "system" = "microphone") => {
         try {
-            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            let stream: MediaStream;
+            if (source === "system") {
+                const captureStream = await navigator.mediaDevices.getDisplayMedia({
+                    audio: true,
+                    video: true,
+                });
+
+                const audioTracks = captureStream.getAudioTracks();
+                if (audioTracks.length === 0) {
+                    captureStream.getTracks().forEach((track) => track.stop());
+                    showToast("No system audio detected. Enable audio sharing and try again.", "error");
+                    return;
+                }
+
+                // Keep only audio tracks to avoid MIME/start incompatibilities with screen video tracks.
+                stream = new MediaStream(audioTracks);
+                captureStream.getVideoTracks().forEach((track) => track.stop());
+            } else {
+                stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            }
+
+            if (stream.getAudioTracks().length === 0) {
+                stream.getTracks().forEach((track) => track.stop());
+                showToast("No audio input detected for recording.", "error");
+                return;
+            }
+
+            setRecordingSource(source);
             streamRef.current = stream;
 
-            const recorder = new MediaRecorder(stream, {
-                mimeType: "audio/webm;codecs=opus",
-            });
+            await startAudioMeter(stream);
+
+            const buildRecorder = (s: MediaStream) => {
+                const candidates = [
+                    "audio/webm;codecs=opus",
+                    "audio/webm",
+                    "video/webm;codecs=vp9,opus",
+                    "video/webm;codecs=vp8,opus",
+                    "video/webm",
+                ];
+
+                for (const mimeType of candidates) {
+                    if (!MediaRecorder.isTypeSupported(mimeType)) continue;
+                    try {
+                        return new MediaRecorder(s, { mimeType });
+                    } catch {
+                        // Try next candidate.
+                    }
+                }
+
+                return new MediaRecorder(s);
+            };
+
+            let recorder = buildRecorder(stream);
 
             setMediaRecorder(recorder);
             setAudioChunks([]);
@@ -174,7 +289,26 @@ export default function TranscriptionsPage() {
                 }
             };
 
-            recorder.start(1000);
+            try {
+                recorder.start(1000);
+            } catch {
+                // Fallback path for browsers/devices that reject the first recorder configuration.
+                try {
+                    recorder = new MediaRecorder(stream);
+                    recorder.ondataavailable = (e) => {
+                        if (e.data.size > 0) {
+                            setAudioChunks((prev) => [...prev, e.data]);
+                        }
+                    };
+                    setMediaRecorder(recorder);
+                    recorder.start();
+                } catch (startErr) {
+                    stream.getTracks().forEach((track) => track.stop());
+                    streamRef.current = null;
+                    stopAudioMeter();
+                    throw startErr;
+                }
+            }
 
             setIsRecording(true);
 
@@ -182,10 +316,15 @@ export default function TranscriptionsPage() {
                 setRecordingTime((t) => t + 1);
             }, 1000);
 
-            showToast("Recording started", "success");
+            showToast(source === "system" ? "System audio recording started" : "Recording started", "success");
         } catch (err) {
-            console.error("Failed to access microphone:", err);
-            showToast("Failed to access microphone. Please check permissions.", "error");
+            console.error("Failed to start recording:", err);
+            showToast(
+                source === "system"
+                    ? "Failed to capture system audio. Please check screen/audio sharing permissions."
+                    : "Failed to access microphone. Please check permissions.",
+                "error"
+            );
         }
     };
 
@@ -196,6 +335,7 @@ export default function TranscriptionsPage() {
         mediaRecorder.stop();
         setIsRecording(false);
         if (timerRef.current) clearInterval(timerRef.current);
+        stopAudioMeter();
 
         if (streamRef.current) {
             streamRef.current.getTracks().forEach((track) => track.stop());
@@ -206,7 +346,8 @@ export default function TranscriptionsPage() {
             try {
                 showToast("Processing recording...", "info");
 
-                const audioBlob = new Blob(audioChunks, { type: "audio/webm" });
+                const blobType = mediaRecorder.mimeType || "audio/webm";
+                const audioBlob = new Blob(audioChunks, { type: blobType });
                 setPreviewBlob(audioBlob); // for preview
 
                 const arrayBuffer = await audioBlob.arrayBuffer();
@@ -243,7 +384,7 @@ export default function TranscriptionsPage() {
             // Fire-and-forget: start the backend job — do NOT await
             invoke("transcribe_recording", {
                 webmPath: savedAudioPath,
-                modelName: selectedModel,
+                modelName: recordingModel,
                 language: null,
                 translateToEnglish: false,
             })
@@ -272,16 +413,23 @@ export default function TranscriptionsPage() {
         setShowRecordingPreview(false);
         setSavedAudioPath(null);
         setPreviewBlob(null);
-        startRecording();
+        startRecording(recordingSource);
     };
 
     // ── Cancel recording ──────────────────────────────────────────────
     const cancelRecording = () => {
+        stopAudioMeter();
         setShowRecordingPreview(false);
         setSavedAudioPath(null);
         setPreviewBlob(null);
         showToast("Recording cancelled", "info");
     };
+
+    useEffect(() => {
+        return () => {
+            stopAudioMeter();
+        };
+    }, []);
 
     useEffect(() => {
         loadTranscriptions();
@@ -587,7 +735,7 @@ export default function TranscriptionsPage() {
 
     // ── JSX (mostly same, just add progress, loading states, etc.) ───
     return (
-        <div className="p-6">
+        <div className={`p-6 min-h-screen ${isDark ? "bg-zinc-950 text-white" : "bg-gray-50 text-gray-900"}`}>
             {/* Header + Search + Filters */}
             <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 mb-8">
                 <h1 className="text-3xl font-bold">{t("Transcriptions")}</h1>
@@ -599,14 +747,16 @@ export default function TranscriptionsPage() {
                 </button>
             </div>
 
-            <OnboardingCard
-                id={current.id}
-                title={current.title}
-                description={current.description}
-                imageSrc={current.imageSrc}
-                buttonText={current.buttonText}
-                onFinish={handleNext}
-            />
+            {current && (
+                <OnboardingCard
+                    id={current.id}
+                    title={current.title}
+                    description={current.description}
+                    imageSrc={current.imageSrc}
+                    buttonText={current.buttonText}
+                    onFinish={handleNext}
+                />
+            )}
 
             {/* Search & Filters */}
             <div className="flex flex-col md:flex-row gap-4 mb-6">
@@ -617,14 +767,18 @@ export default function TranscriptionsPage() {
                         placeholder="Search transcriptions..."
                         value={search}
                         onChange={(e) => setSearch(e.target.value)}
-                        className="w-full pl-11 pr-4 py-2.5 bg-zinc-900 border border-zinc-700 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500 text-white placeholder-zinc-500"
+                        className={`w-full pl-11 pr-4 py-2.5 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500 ${isDark
+                            ? "bg-zinc-900 border border-zinc-700 text-white placeholder-zinc-500"
+                            : "bg-white border border-gray-300 text-gray-900 placeholder-gray-500"}`}
                     />
                 </div>
 
                 <select
                     value={sortBy}
                     onChange={(e) => setSortBy(e.target.value as SortOption)}
-                    className="px-4 py-2.5 bg-zinc-900 border border-zinc-700 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500 text-white"
+                    className={`px-4 py-2.5 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500 ${isDark
+                        ? "bg-zinc-900 border border-zinc-700 text-white"
+                        : "bg-white border border-gray-300 text-gray-900"}`}
                 >
                     <option value="newest">{t("Newest first")}</option>
                     <option value="oldest">{t("Oldest first")}</option>
@@ -634,7 +788,9 @@ export default function TranscriptionsPage() {
                 <select
                     value={sourceFilter}
                     onChange={(e) => setSourceFilter(e.target.value as SourceFilter)}
-                    className="px-4 py-2.5 bg-zinc-900 border border-zinc-700 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500 text-white"
+                    className={`px-4 py-2.5 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500 ${isDark
+                        ? "bg-zinc-900 border border-zinc-700 text-white"
+                        : "bg-white border border-gray-300 text-gray-900"}`}
                 >
                     <option value="all">{t("All sources")}</option>
                     <option value="file">{t("Files")}</option>
@@ -786,7 +942,9 @@ export default function TranscriptionsPage() {
                         <select
                             value={pageSize}
                             onChange={(e) => { setPageSize(Number(e.target.value)); setCurrentPage(1); }}
-                            className="px-3 py-1 bg-zinc-900 border border-zinc-700 rounded text-white"
+                            className={`px-3 py-1 rounded ${isDark
+                                ? "bg-zinc-900 border border-zinc-700 text-white"
+                                : "bg-white border border-gray-300 text-gray-900"}`}
                         >
                             <option value={6}>6 / page</option>
                             <option value={9}>9 / page</option>
@@ -796,7 +954,9 @@ export default function TranscriptionsPage() {
                         <button
                             onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
                             disabled={currentPage === 1}
-                            className="px-3 py-1 bg-zinc-800 text-white rounded disabled:opacity-50"
+                            className={`px-3 py-1 rounded disabled:opacity-50 ${isDark
+                                ? "bg-zinc-800 text-white"
+                                : "bg-gray-200 text-gray-900"}`}
                         >
                             Prev
                         </button>
@@ -806,7 +966,9 @@ export default function TranscriptionsPage() {
                         <button
                             onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
                             disabled={currentPage === totalPages}
-                            className="px-3 py-1 bg-zinc-800 text-white rounded disabled:opacity-50"
+                            className={`px-3 py-1 rounded disabled:opacity-50 ${isDark
+                                ? "bg-zinc-800 text-white"
+                                : "bg-gray-200 text-gray-900"}`}
                         >
                             Next
                         </button>
@@ -827,14 +989,16 @@ export default function TranscriptionsPage() {
                             initial={{ scale: 0.9, opacity: 0 }}
                             animate={{ scale: 1, opacity: 1 }}
                             exit={{ scale: 0.9, opacity: 0 }}
-                            className="bg-zinc-900 rounded-2xl p-8 max-w-md w-full mx-4 border border-zinc-700 shadow-2xl"
+                            className={`rounded-2xl p-8 max-w-md w-full mx-4 shadow-2xl ${isDark
+                                ? "bg-zinc-900 border border-zinc-700"
+                                : "bg-white border border-gray-200"}`}
                         >
                             <div className="flex items-center gap-4 mb-6">
                                 <AlertTriangle className="w-10 h-10 text-red-500" />
-                                <h3 className="text-2xl font-bold text-white">Delete Transcription?</h3>
+                                <h3 className={`text-2xl font-bold ${isDark ? "text-white" : "text-gray-900"}`}>Delete Transcription?</h3>
                             </div>
 
-                            <p className="text-zinc-300 mb-8">
+                            <p className={`mb-8 ${isDark ? "text-zinc-300" : "text-gray-600"}`}>
                                 {t("Are you sure you want to delete")}<strong>"{deleteConfirm.title}"</strong>?<br />
                                 {t("This action cannot be undone")}
                             </p>
@@ -842,7 +1006,9 @@ export default function TranscriptionsPage() {
                             <div className="flex gap-4">
                                 <button
                                     onClick={() => setDeleteConfirm(null)}
-                                    className="flex-1 py-3 bg-zinc-800 hover:bg-zinc-700 rounded-xl font-medium transition"
+                                    className={`flex-1 py-3 rounded-xl font-medium transition ${isDark
+                                        ? "bg-zinc-800 hover:bg-zinc-700"
+                                        : "bg-gray-200 hover:bg-gray-300 text-gray-900"}`}
                                 >
                                     Cancel
                                 </button>
@@ -873,7 +1039,7 @@ export default function TranscriptionsPage() {
             {/* Recording Preview Modal */}
             {showRecordingPreview && (
                 <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50">
-                    <div className="bg-zinc-900 p-8 rounded-2xl max-w-lg w-full mx-4">
+                    <div className={`p-8 rounded-2xl max-w-lg w-full mx-4 ${isDark ? "bg-zinc-900 text-white" : "bg-white text-gray-900"}`}>
                         <h3 className="text-xl font-bold mb-4">Recording Preview</h3>
 
                         {/* Audio player */}
@@ -887,7 +1053,7 @@ export default function TranscriptionsPage() {
                         <div className="flex justify-between gap-4">
                             <button
                                 onClick={recordAgain}
-                                className="flex-1 py-3 bg-zinc-700 hover:bg-zinc-600 rounded-xl font-medium"
+                                    className={`flex-1 py-3 rounded-xl font-medium ${isDark ? "bg-zinc-700 hover:bg-zinc-600" : "bg-gray-200 hover:bg-gray-300"}`}
                             >
                                 {t("Record Again")}
                             </button>
@@ -944,7 +1110,9 @@ export default function TranscriptionsPage() {
                                     value={youtubeUrl}
                                     onChange={(e) => setYoutubeUrl(e.target.value)}
                                     placeholder="Paste YouTube link..."
-                                    className="w-full p-3 bg-zinc-800 border border-zinc-700 rounded-xl text-white placeholder-zinc-500 focus:outline-none focus:border-zinc-500 mb-4"
+                                    className={`w-full p-3 rounded-xl focus:outline-none mb-4 ${isDark
+                                        ? "bg-zinc-800 border border-zinc-700 text-white placeholder-zinc-500 focus:border-zinc-500"
+                                        : "bg-white border border-gray-300 text-gray-900 placeholder-gray-500 focus:border-gray-500"}`}
                                 />
 
                                 {/* Model Selector */}
@@ -962,7 +1130,9 @@ export default function TranscriptionsPage() {
                                         <select
                                             value={selectedModel}
                                             onChange={(e) => setSelectedModel(e.target.value)}
-                                            className="w-full p-3 bg-zinc-800 border border-zinc-700 rounded-xl text-white focus:outline-none focus:border-zinc-500"
+                                            className={`w-full p-3 rounded-xl focus:outline-none ${isDark
+                                                ? "bg-zinc-800 border border-zinc-700 text-white focus:border-zinc-500"
+                                                : "bg-white border border-gray-300 text-gray-900 focus:border-gray-500"}`}
                                         >
                                             {WHISPER_MODELS.map((model) => {
                                                 const isDownloaded = downloadedModels.includes(model.value);
@@ -1039,31 +1209,90 @@ export default function TranscriptionsPage() {
                                     </div>
                                 </div>
 
-                                {isRecording ? (
-                                    <div className="flex flex-col sm:flex-row items-center justify-between gap-4">
-                                        <div className="flex items-center gap-3 flex-1">
-                                            <div className="w-4 h-4 bg-red-500 rounded-full animate-pulse" />
-                                            <span className="font-mono font-bold text-lg">
-                                                {Math.floor(recordingTime / 60).toString().padStart(2, "0")}:
-                                                {(recordingTime % 60).toString().padStart(2, "0")}
-                                            </span>
+                                <div className="grid grid-cols-1 lg:grid-cols-5 gap-4">
+                                    <div className="lg:col-span-3 space-y-4">
+                                        <div>
+                                            <label className="text-xs uppercase tracking-wide text-zinc-500 mb-2 block">Recording model</label>
+                                            <select
+                                                value={recordingModel}
+                                                onChange={(e) => setRecordingModel(e.target.value)}
+                                                disabled={isRecording}
+                                                className="w-full rounded-xl border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 px-3 py-2 text-sm"
+                                            >
+                                                {WHISPER_MODELS.map((model) => (
+                                                    <option key={model.value} value={model.value}>
+                                                        {model.label}
+                                                    </option>
+                                                ))}
+                                            </select>
+                                            <p className="mt-1 text-xs text-zinc-500">Selected: {getRecordingModelLabel(recordingModel)}</p>
                                         </div>
 
-                                        <button
-                                            onClick={stopRecording}
-                                            className="px-6 py-3 bg-red-600 hover:bg-red-700 text-white rounded-xl font-bold flex items-center gap-2 transition-colors"
-                                        >
-                                            <Square className="w-5 h-5" /> {t("Stop & Transcribe")}
-                                        </button>
+                                        <div className="rounded-xl border border-zinc-200 dark:border-zinc-700 p-3 bg-zinc-50 dark:bg-zinc-900/40">
+                                            <p className="text-xs text-zinc-500">
+                                                System audio recording works best when audio sharing is enabled in the capture dialog.
+                                            </p>
+                                        </div>
+
+                                        {!isRecording ? (
+                                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                                                <button
+                                                    onClick={() => startRecording("microphone")}
+                                                    className="w-full py-3 bg-green-600 hover:bg-green-700 text-white rounded-xl font-bold flex items-center justify-center gap-2 transition-colors"
+                                                >
+                                                    <Mic className="w-5 h-5" />
+                                                    {t("Start Recording")}
+                                                </button>
+                                                <button
+                                                    onClick={() => startRecording("system")}
+                                                    className="w-full py-3 bg-cyan-600 hover:bg-cyan-700 text-white rounded-xl font-bold flex items-center justify-center gap-2 transition-colors"
+                                                >
+                                                    <Monitor className="w-5 h-5" />
+                                                    Record System Audio
+                                                </button>
+                                            </div>
+                                        ) : (
+                                            <button
+                                                onClick={stopRecording}
+                                                className="w-full px-6 py-3 bg-red-600 hover:bg-red-700 text-white rounded-xl font-bold flex items-center justify-center gap-2 transition-colors"
+                                            >
+                                                <Square className="w-5 h-5" /> {t("Stop & Transcribe")}
+                                            </button>
+                                        )}
                                     </div>
-                                ) : (
-                                    <button
-                                        onClick={startRecording}
-                                        className="w-full py-3 bg-green-600 hover:bg-green-700 text-white rounded-xl font-bold flex items-center justify-center gap-2 transition-colors"
-                                    >
-                                        <Mic className="w-5 h-5" /> {t("Start Recording")}
-                                    </button>
-                                )}
+
+                                    <div className="lg:col-span-2">
+                                        <div className="rounded-2xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-900/50 p-4 h-full">
+                                            <div className="flex items-center justify-between mb-3">
+                                                <span className="text-sm font-semibold">Recording Monitor</span>
+                                                <span className={`text-xs px-2 py-1 rounded-full ${isRecording ? "bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300" : "bg-zinc-200 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"}`}>
+                                                    {isRecording ? "LIVE" : "IDLE"}
+                                                </span>
+                                            </div>
+                                            <div className="flex items-center gap-2 mb-3">
+                                                <div className={`w-3 h-3 rounded-full ${isRecording ? "bg-red-500 animate-pulse" : "bg-zinc-400"}`} />
+                                                <span className="font-mono text-sm">
+                                                    {Math.floor(recordingTime / 60).toString().padStart(2, "0")}:
+                                                    {(recordingTime % 60).toString().padStart(2, "0")}
+                                                </span>
+                                                <span className="text-xs text-zinc-500 ml-auto">
+                                                    {recordingSource === "system" ? "System" : "Mic"}
+                                                </span>
+                                            </div>
+                                            <div className="flex items-end gap-1 h-10 mb-2">
+                                                {waveformBars.map((h, i) => (
+                                                    <div
+                                                        key={i}
+                                                        className="flex-1 rounded-sm bg-red-500/80"
+                                                        style={{ height: `${h}px` }}
+                                                    />
+                                                ))}
+                                            </div>
+                                            <p className="text-xs text-zinc-500">Audio level: {recordingLevel}%</p>
+                                        </div>
+                                    </div>
+                                </div>
+
                             </div>
                         </motion.div>
                     </motion.div>

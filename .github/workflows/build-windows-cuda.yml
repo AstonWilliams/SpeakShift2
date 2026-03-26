@@ -4,7 +4,6 @@ permissions:
   contents: read
 
 on:
-  workflow_dispatch:
   push:
     branches: [main, master]
 
@@ -14,6 +13,7 @@ jobs:
     env:
       TARGET_TRIPLET: x86_64-pc-windows-msvc
       NLLB_SOURCE_REPO: https://github.com/AstonWilliams/Metal-CoreMLwhisper.cpp-build.git
+      SPEAKSHIFT_LICENSE_PUBLIC_KEY_B64: c8jYXlpk8bFV5WggseDoLgg5Q0Ujf/+vTp+kMnzeiic=
 
     steps:
       - name: Checkout
@@ -43,6 +43,51 @@ jobs:
         with:
           cuda: '12.4.1'
 
+      - name: Configure Windows build environment
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $vcvars = $null
+          if (Test-Path $vswhere) {
+            $vcvars = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -find 'VC\Auxiliary\Build\vcvars64.bat' | Select-Object -First 1
+          }
+          if (-not $vcvars) {
+            $fallbacks = @(
+              'C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat',
+              'C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat',
+              'C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Auxiliary\Build\vcvars64.bat',
+              'C:\Program Files (x86)\Microsoft Visual Studio\2019\Enterprise\VC\Auxiliary\Build\vcvars64.bat',
+              'C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Auxiliary\Build\vcvars64.bat',
+              'C:\Program Files (x86)\Microsoft Visual Studio\2019\Professional\VC\Auxiliary\Build\vcvars64.bat'
+            )
+            $vcvars = $fallbacks | Where-Object { Test-Path $_ } | Select-Object -First 1
+          }
+          if (-not $vcvars) {
+            throw 'vcvars64.bat not found on runner'
+          }
+          "VCVARS_BAT=$vcvars" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+          $cudaRoot = $env:CUDA_PATH
+          if (-not $cudaRoot) {
+            $cudaBase = 'C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA'
+            if (Test-Path $cudaBase) {
+              $cudaRoot = Get-ChildItem $cudaBase -Directory | Sort-Object Name -Descending | Select-Object -First 1 -ExpandProperty FullName
+            }
+          }
+          if ($cudaRoot) {
+            "CUDA_TOOLKIT_ROOT_DIR=$cudaRoot" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+            "$cudaRoot\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          }
+
+          $staticCrtFlag = '-C target-feature=+crt-static'
+          if ([string]::IsNullOrWhiteSpace($env:RUSTFLAGS)) {
+            "RUSTFLAGS=$staticCrtFlag" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          } else {
+            "RUSTFLAGS=$env:RUSTFLAGS $staticCrtFlag" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          }
+
       - name: Prepare build tools
         shell: pwsh
         run: |
@@ -62,8 +107,10 @@ jobs:
         shell: pwsh
         run: |
           git clone --depth 1 https://github.com/ggml-org/whisper.cpp.git whisper-src
-          cmake -S whisper-src -B whisper-src/build -DCMAKE_BUILD_TYPE=Release -DGGML_CUDA=ON -DGGML_NATIVE=OFF -DCMAKE_CUDA_ARCHITECTURES=75;86
-          cmake --build whisper-src/build --target whisper-cli --config Release
+          cmd.exe /d /s /c "call \"$env:VCVARS_BAT\" && cmake -S whisper-src -B whisper-src/build -DCMAKE_BUILD_TYPE=Release -DGGML_CUDA=ON -DGGML_NATIVE=OFF -DCMAKE_CUDA_ARCHITECTURES=75;86 -DCUDAToolkit_ROOT=\"$env:CUDA_TOOLKIT_ROOT_DIR\""
+          if ($LASTEXITCODE -ne 0) { throw 'CMake configure failed for whisper.cpp CUDA build' }
+          cmd.exe /d /s /c "call \"$env:VCVARS_BAT\" && cmake --build whisper-src/build --target whisper-cli --config Release"
+          if ($LASTEXITCODE -ne 0) { throw 'CMake build failed for whisper.cpp CUDA build' }
           $whisperCli = Get-ChildItem -Recurse whisper-src/build -Filter whisper-cli.exe | Select-Object -First 1
           if (-not $whisperCli) { throw "whisper-cli.exe not found in whisper build output" }
           Copy-Item $whisperCli.FullName "src-tauri/binaries/whisper/whisper-cli-$env:TARGET_TRIPLET.exe"
@@ -75,8 +122,8 @@ jobs:
         run: |
           git clone --depth 1 "$env:NLLB_SOURCE_REPO" nllb-src
           Push-Location nllb-src/nllb_build
-          cargo build --release
-          Pop-Location
+          cmd.exe /d /s /c "call \"$env:VCVARS_BAT\" && cargo build --release"
+          if ($LASTEXITCODE -ne 0) { throw 'NLLB cargo build failed' }
           Pop-Location
           $nllbBin = Get-ChildItem -Recurse -Path nllb-src -Filter *.exe | Where-Object { $_.FullName -match "target[\\/]release" -and $_.Name -like "nllb*" } | Select-Object -First 1
           if (-not $nllbBin) {
@@ -95,7 +142,8 @@ jobs:
         run: npm ci
 
       - name: Build Tauri app
-        run: npm run tauri build -- --config src-tauri/tauri.windows.conf.json --target ${{ env.TARGET_TRIPLET }}
+        shell: cmd
+        run: call "%VCVARS_BAT%" && npm run tauri build -- --config src-tauri/tauri.windows.conf.json --target %TARGET_TRIPLET%
 
       - name: Upload artifacts
         if: always()

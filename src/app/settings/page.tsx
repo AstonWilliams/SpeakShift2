@@ -18,10 +18,12 @@ import {
   Users,
   Languages,
   AudioLines,
+  Lock,
 } from "lucide-react";
 import { useTheme } from "next-themes";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { open } from "@tauri-apps/plugin-shell";
 import { toast } from "sonner";
 import { useAppLocale } from "@/lib/IntlProvider";
 import { Globe } from "lucide-react";
@@ -96,6 +98,13 @@ interface ParakeetTdtModelStatus {
   downloaded_files: number;
   missing_files: string[];
   active_model_dir?: string | null;
+}
+
+interface EntitlementStatus {
+  isPro: boolean;
+  plan: string;
+  lockedFeatures: string[];
+  message: string;
 }
 
 const LANGUAGES = [
@@ -183,6 +192,12 @@ export default function SettingsPage() {
   const [diarModelToDelete, setDiarModelToDelete] = useState<string | null>(null);
 
   const [modelToDelete, setModelToDelete] = useState<string | null>(null);
+  const [entitlement, setEntitlement] = useState<EntitlementStatus>({
+    isPro: false,
+    plan: "free",
+    lockedFeatures: [],
+    message: "Free tier active",
+  });
 
   const { locale, setLocale } = useAppLocale();
   const t = useTranslations();
@@ -194,6 +209,7 @@ export default function SettingsPage() {
     loadNllbModels();
     loadQwenModelStatus();
     loadTdtModelStatus();
+    loadEntitlement();
 
     const unlisten = listen("download-model-progress", (event) => {
       const payload = event.payload as {
@@ -257,6 +273,29 @@ export default function SettingsPage() {
       unlistenTdt.then((f) => f());
     };
   }, []);
+
+  const loadEntitlement = async () => {
+    try {
+      const ent = await invoke<EntitlementStatus>("get_entitlement_status");
+      setEntitlement(ent);
+    } catch {
+      setEntitlement({
+        isPro: false,
+        plan: "free",
+        lockedFeatures: [],
+        message: "Free tier active",
+      });
+    }
+  };
+
+  const openBuyLink = async () => {
+    const url = "https://usefulthings.gumroad.com/l/bzris";
+    try {
+      await open(url);
+    } catch {
+      window.open(url, "_blank", "noopener,noreferrer");
+    }
+  };
 
   useEffect(() => {
     loadNllbModels();
@@ -602,7 +641,7 @@ export default function SettingsPage() {
                 onClick={() => setTheme(id)}
                 className={`p-6 rounded-3xl border transition-all flex flex-col items-center gap-4 shadow-md
               ${theme === id
-                    ? "border-pink-500 bg-gradient-to-br from-pink-50 to-white dark:from-pink-950/40 dark:to-zinc-900 shadow-pink-500/30 dark:shadow-pink-500/20"
+                    ? "border-pink-500 bg-linear-to-br from-pink-50 to-white dark:from-pink-950/40 dark:to-zinc-900 shadow-pink-500/30 dark:shadow-pink-500/20"
                     : isDark
                       ? "border-zinc-700 bg-zinc-900/60 hover:bg-zinc-800/80"
                       : "border-gray-300 bg-white hover:bg-gray-50"}`}
@@ -645,8 +684,8 @@ export default function SettingsPage() {
                       className={`w-full relative group rounded-2xl px-5 py-4 transition-all duration-200 flex items-center justify-between overflow-hidden
                         ${isSelected
                           ? `${isDark
-                            ? "bg-gradient-to-r from-cyan-500/30 to-cyan-500/10 border border-cyan-500/50 shadow-lg shadow-cyan-500/20"
-                            : "bg-gradient-to-r from-cyan-100/50 to-cyan-50/30 border border-cyan-400/50 shadow-md shadow-cyan-300/20"
+                            ? "bg-linear-to-r from-cyan-500/30 to-cyan-500/10 border border-cyan-500/50 shadow-lg shadow-cyan-500/20"
+                            : "bg-linear-to-r from-cyan-100/50 to-cyan-50/30 border border-cyan-400/50 shadow-md shadow-cyan-300/20"
                           }`
                           : `${isDark
                             ? "bg-zinc-800/30 border border-zinc-700/50 hover:bg-zinc-700/40 hover:border-zinc-600/50"
@@ -655,7 +694,7 @@ export default function SettingsPage() {
                         }`}
                     >
                       {/* Animated background gradient on hover */}
-                      <div className={`absolute inset-0 opacity-0 group-hover:opacity-10 transition-opacity ${isDark ? "bg-gradient-to-r from-cyan-500 to-transparent" : "bg-gradient-to-r from-cyan-400 to-transparent"}`} />
+                      <div className={`absolute inset-0 opacity-0 group-hover:opacity-10 transition-opacity ${isDark ? "bg-linear-to-r from-cyan-500 to-transparent" : "bg-linear-to-r from-cyan-400 to-transparent"}`} />
 
                       <div className="relative flex-1 text-left">
                         <div className="flex items-center gap-3">
@@ -757,7 +796,7 @@ export default function SettingsPage() {
                 >
                   {/* Real progress gradient fill */}
                   <motion.div
-                    className="absolute inset-0 bg-gradient-to-t from-pink-600/90 via-pink-500/70 to-transparent z-0"
+                    className="absolute inset-0 bg-linear-to-t from-pink-600/90 via-pink-500/70 to-transparent z-0"
                     initial={{ y: "100%" }}
                     animate={{ y: `${100 - progress}%` }}
                     transition={{ duration: 0.4, ease: "easeOut" }}
@@ -802,7 +841,7 @@ export default function SettingsPage() {
                         className={`flex-1 py-3.5 rounded-xl font-medium transition flex items-center justify-center gap-2
                         ${isDownloading
                             ? "bg-zinc-700/80 text-white cursor-wait"
-                            : "bg-gradient-to-r from-pink-600 to-pink-700 hover:from-pink-700 hover:to-pink-800 text-white"}`}
+                            : "bg-linear-to-r from-pink-600 to-pink-700 hover:from-pink-700 hover:to-pink-800 text-white"}`}
                       >
                         {isDownloading ? (
                           <>
@@ -829,7 +868,7 @@ export default function SettingsPage() {
         </section>
 
         {/* Parakeet-TDT Model Section */}
-        <section className="space-y-8">
+        {/* <section className="space-y-8">
           <div className="flex items-center justify-between">
             <div>
               <h2 className={`text-3xl font-black flex items-center gap-3 ${isDark ? "text-white" : "text-gray-900"}`}>
@@ -861,7 +900,7 @@ export default function SettingsPage() {
                 }`}
             >
               <motion.div
-                className="absolute inset-0 bg-gradient-to-t from-cyan-600/85 via-cyan-500/70 to-transparent z-0"
+                className="absolute inset-0 bg-linear-to-t from-cyan-600/85 via-cyan-500/70 to-transparent z-0"
                 initial={{ y: "100%" }}
                 animate={{ y: `${100 - tdtProgress}%` }}
                 transition={{ duration: 0.4, ease: "easeOut" }}
@@ -918,7 +957,7 @@ export default function SettingsPage() {
                       disabled={tdtBusy}
                       className={`w-full py-3 rounded-xl font-medium transition flex items-center justify-center gap-2 ${tdtBusy
                         ? "bg-zinc-700/80 text-white cursor-wait"
-                        : "bg-gradient-to-r from-cyan-600 to-cyan-700 hover:from-cyan-700 hover:to-cyan-800 text-white"
+                        : "bg-linear-to-r from-cyan-600 to-cyan-700 hover:from-cyan-700 hover:to-cyan-800 text-white"
                         }`}
                     >
                       <Download className="w-4 h-4" />
@@ -940,10 +979,10 @@ export default function SettingsPage() {
               </div>
             </div>
           </div>
-        </section>
+        </section> */}
 
-        {/* NLLB Translation Models Section */}
-        <section className="space-y-8">
+        {/*Qwen Models Section */}
+        <section className="space-y-8 relative">
           <div className="flex items-center justify-between">
             <div>
               <h2 className={`text-3xl font-black flex items-center gap-3 ${isDark ? "text-white" : "text-gray-900"}`}>
@@ -975,7 +1014,7 @@ export default function SettingsPage() {
                 }`}
             >
               <motion.div
-                className="absolute inset-0 bg-gradient-to-t from-emerald-600/85 via-emerald-500/70 to-transparent z-0"
+                className="absolute inset-0 bg-linear-to-t from-emerald-600/85 via-emerald-500/70 to-transparent z-0"
                 initial={{ y: "100%" }}
                 animate={{ y: `${100 - qwenProgress}%` }}
                 transition={{ duration: 0.4, ease: "easeOut" }}
@@ -1019,7 +1058,7 @@ export default function SettingsPage() {
                     disabled={qwenBusy}
                     className={`w-full py-3.5 rounded-xl font-medium transition flex items-center justify-center gap-2 ${qwenBusy
                       ? "bg-zinc-700/80 text-white cursor-wait"
-                      : "bg-gradient-to-r from-emerald-600 to-emerald-700 hover:from-emerald-700 hover:to-emerald-800 text-white"
+                      : "bg-linear-to-r from-emerald-600 to-emerald-700 hover:from-emerald-700 hover:to-emerald-800 text-white"
                       }`}
                   >
                     {qwenBusy ? (
@@ -1071,10 +1110,30 @@ export default function SettingsPage() {
               </div>
             </div> */}
           </div>
+
+          {!entitlement.isPro && (
+            <div className="absolute inset-0 z-20 bg-zinc-950/45 backdrop-blur-[1px] rounded-3xl flex items-center justify-center p-4">
+              <div className="max-w-md w-full rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-5 text-center shadow-xl">
+                <div className="inline-flex items-center gap-2 text-pink-600 dark:text-pink-400 font-semibold mb-2">
+                  <Lock className="w-4 h-4" />
+                  Pro Required
+                </div>
+                <p className="text-sm text-zinc-600 dark:text-zinc-300 mb-4">
+                  Qwen model controls are locked on Free tier.
+                </p>
+                <button
+                  onClick={openBuyLink}
+                  className="px-4 py-2 rounded-xl bg-pink-600 hover:bg-pink-700 text-white text-sm font-semibold"
+                >
+                  Unlock Pro
+                </button>
+              </div>
+            </div>
+          )}
         </section>
 
         {/* NLLB Translation Models Section */}
-        <section className="space-y-8 mb-16">
+        <section className="space-y-8 mb-16 relative">
           <div className="flex items-center justify-between">
             <div>
               <h2 className={`text-3xl font-black flex items-center gap-3 ${isDark ? "text-white" : "text-gray-900"}`}>
@@ -1137,7 +1196,7 @@ export default function SettingsPage() {
                       </div>
 
                       {isActive && !isDownloading && (
-                        <CheckCircle className="w-6 h-6 text-green-500 flex-shrink-0" />
+                        <CheckCircle className="w-6 h-6 text-green-500 shrink-0" />
                       )}
                     </div>
                   </div>
@@ -1212,10 +1271,30 @@ export default function SettingsPage() {
               );
             })}
           </div>
+
+          {!entitlement.isPro && (
+            <div className="absolute inset-0 z-20 bg-zinc-950/45 backdrop-blur-[1px] rounded-3xl flex items-center justify-center p-4">
+              <div className="max-w-md w-full rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-5 text-center shadow-xl">
+                <div className="inline-flex items-center gap-2 text-pink-600 dark:text-pink-400 font-semibold mb-2">
+                  <Lock className="w-4 h-4" />
+                  Pro Required
+                </div>
+                <p className="text-sm text-zinc-600 dark:text-zinc-300 mb-4">
+                  Translation model management is locked on Free tier.
+                </p>
+                <button
+                  onClick={openBuyLink}
+                  className="px-4 py-2 rounded-xl bg-pink-600 hover:bg-pink-700 text-white text-sm font-semibold"
+                >
+                  Unlock Pro
+                </button>
+              </div>
+            </div>
+          )}
         </section>
 
         {/* Diarization Models */}
-        <section className="space-y-8">
+        <section className="space-y-8 relative">
           <div className="flex items-center justify-between">
             <div>
               <h2 className={`text-3xl font-black flex items-center gap-3 ${isDark ? "text-white" : "text-gray-900"}`}>
@@ -1257,7 +1336,7 @@ export default function SettingsPage() {
                 >
                   {/* Progress gradient overlay */}
                   <motion.div
-                    className="absolute inset-0 bg-gradient-to-t from-purple-600/80 via-purple-500/60 to-transparent z-0"
+                    className="absolute inset-0 bg-linear-to-t from-purple-600/80 via-purple-500/60 to-transparent z-0"
                     initial={{ y: "100%" }}
                     animate={{ y: `${100 - progress}%` }}
                     transition={{ duration: 0.4, ease: "easeOut" }}
@@ -1303,7 +1382,7 @@ export default function SettingsPage() {
                         disabled={isDownloading}
                         className={`w-full py-3.5 rounded-xl font-medium transition flex items-center justify-center gap-2 ${isDownloading
                           ? "bg-zinc-700/80 text-white cursor-wait"
-                          : "bg-gradient-to-r from-purple-600 to-purple-700 hover:from-purple-700 hover:to-purple-800 text-white"
+                          : "bg-linear-to-r from-purple-600 to-purple-700 hover:from-purple-700 hover:to-purple-800 text-white"
                           }`}
                       >
                         {isDownloading ? (
@@ -1328,6 +1407,26 @@ export default function SettingsPage() {
               );
             })}
           </div>
+
+          {!entitlement.isPro && (
+            <div className="absolute inset-0 z-20 bg-zinc-950/45 backdrop-blur-[1px] rounded-3xl flex items-center justify-center p-4">
+              <div className="max-w-md w-full rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-5 text-center shadow-xl">
+                <div className="inline-flex items-center gap-2 text-pink-600 dark:text-pink-400 font-semibold mb-2">
+                  <Lock className="w-4 h-4" />
+                  Pro Required
+                </div>
+                <p className="text-sm text-zinc-600 dark:text-zinc-300 mb-4">
+                  Diarization model controls are locked on Free tier.
+                </p>
+                <button
+                  onClick={openBuyLink}
+                  className="px-4 py-2 rounded-xl bg-pink-600 hover:bg-pink-700 text-white text-sm font-semibold"
+                >
+                  Unlock Pro
+                </button>
+              </div>
+            </div>
+          )}
         </section>
 
         {/* Security Vault - unchanged dimensions & spacing */}

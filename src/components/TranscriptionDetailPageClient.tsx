@@ -58,7 +58,7 @@ type DisplaySegment = {
     clusterId?: string;
 };
 
-type ExportFormat = "json" | "srt" | "vtt" | "txt" | "pdf" | "docx";
+type ExportFormat = "json" | "srt" | "vtt" | "txt" | "pdf" | "docx" | "csv" | "tsv" | "md";
 
 function normalizeLocalAudioPath(input: string): string {
     let normalized = input.trim();
@@ -659,6 +659,54 @@ export default function TranscriptionDetailPage({ params }: { params: { id: stri
                     .join("\n");
                 const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
                 await saveBlob(blob, `${baseName}.txt`, "Text file");
+            } else if (format === "csv") {
+                const esc = (value: string) => `"${value.replace(/"/g, '""')}"`;
+                const content = [
+                    "index,start_seconds,end_seconds,start_srt,end_srt,speaker,text",
+                    ...rows.map((row) => [
+                        row.index,
+                        row.start.toFixed(3),
+                        row.end.toFixed(3),
+                        esc(row.startSrt),
+                        esc(row.endSrt),
+                        esc(row.speaker),
+                        esc(row.text),
+                    ].join(",")),
+                ].join("\n");
+                const blob = new Blob([content], { type: "text/csv;charset=utf-8" });
+                await saveBlob(blob, `${baseName}.csv`, "CSV file");
+            } else if (format === "tsv") {
+                const sanitize = (value: string) => value.replace(/[\t\n\r]+/g, " ").trim();
+                const content = [
+                    "index\tstart_seconds\tend_seconds\tstart_srt\tend_srt\tspeaker\ttext",
+                    ...rows.map((row) => [
+                        row.index,
+                        row.start.toFixed(3),
+                        row.end.toFixed(3),
+                        sanitize(row.startSrt),
+                        sanitize(row.endSrt),
+                        sanitize(row.speaker),
+                        sanitize(row.text),
+                    ].join("\t")),
+                ].join("\n");
+                const blob = new Blob([content], { type: "text/tab-separated-values;charset=utf-8" });
+                await saveBlob(blob, `${baseName}.tsv`, "TSV file");
+            } else if (format === "md") {
+                const escapePipes = (value: string) => value.replace(/\|/g, "\\|").replace(/[\n\r]+/g, " ").trim();
+                const tableRows = rows
+                    .map(
+                        (row) => `| ${row.index} | ${row.startSrt} | ${row.endSrt} | ${escapePipes(row.speaker)} | ${escapePipes(row.text)} |`
+                    )
+                    .join("\n");
+                const content = [
+                    `# ${transcription?.title || transcription?.filename || "Transcription"}`,
+                    "",
+                    "| # | Start | End | Speaker | Text |",
+                    "|---:|:------|:----|:--------|:-----|",
+                    tableRows,
+                ].join("\n");
+                const blob = new Blob([content], { type: "text/markdown;charset=utf-8" });
+                await saveBlob(blob, `${baseName}.md`, "Markdown file");
             } else if (format === "pdf") {
                 const { jsPDF } = await import("jspdf");
                 const doc = new jsPDF({ unit: "pt", format: "a4" });
@@ -1193,6 +1241,9 @@ export default function TranscriptionDetailPage({ params }: { params: { id: stri
                                     <option value="srt">SRT</option>
                                     <option value="vtt">VTT</option>
                                     <option value="txt">TXT</option>
+                                    <option value="csv">CSV</option>
+                                    <option value="tsv">TSV</option>
+                                    <option value="md">MD</option>
                                     <option value="pdf">PDF</option>
                                     <option value="docx">DOCX</option>
                                 </select>

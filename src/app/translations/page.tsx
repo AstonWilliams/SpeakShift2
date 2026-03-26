@@ -203,7 +203,7 @@ export default function TranslationsListPage() {
       >
         <div className="flex items-center justify-between flex-wrap gap-4">
           <div className="flex items-center gap-4">
-            <div className="w-14 h-14 rounded-2xl bg-gradient-to-br from-pink-500 to-purple-600 flex items-center justify-center shadow-lg">
+            <div className="w-14 h-14 rounded-2xl bg-linear-to-br from-pink-500 to-purple-600 flex items-center justify-center shadow-lg">
               <Languages className="w-7 h-7 text-white" />
             </div>
             <div>
@@ -249,7 +249,7 @@ export default function TranslationsListPage() {
           <p className="text-zinc-500 mb-6">
             {search.trim()
               ? t("Try different keywords")
-              : t("Create a new translation from your transcriptions.")}
+              : t("Create a new translation from your transcriptions")}
           </p>
           <Link href="/transcriptions">
             <button className="px-8 py-4 bg-pink-600 hover:bg-pink-500 text-white rounded-xl font-bold">
@@ -331,7 +331,7 @@ export default function TranslationsListPage() {
                     </div>
 
                     {/* Icon stays non-clickable for navigation */}
-                    <FileText className="w-6 h-6 text-pink-500 opacity-80 flex-shrink-0 mt-1" />
+                    <FileText className="w-6 h-6 text-pink-500 opacity-80 shrink-0 mt-1" />
                   </div>
 
                   {/* Optional: target language badges */}

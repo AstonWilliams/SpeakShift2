@@ -40,6 +40,8 @@ tauri-plugin-fs = "2.4.5"
 sysinfo = "0.37.2"
 walkdir = "2.5.0"
 zip = { version = "2.2.1", default-features = false, features = ["deflate"] }
+ed25519-dalek = "2.1.1"
+sha2 = "0.10.8"
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]

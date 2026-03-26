@@ -4,3 +4,9 @@
 /src-tauri/binaries
 /src-tauri/target
 /binaries
+/license-tools/keys
+/license-tools/issued
+/license-tools/target
+key
+generator.txt
+/license-tools

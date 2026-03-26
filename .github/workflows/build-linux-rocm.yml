@@ -4,7 +4,6 @@ permissions:
   contents: read
 
 on:
-  workflow_dispatch:
   push:
     branches: [main, master]
 
@@ -14,6 +13,7 @@ jobs:
     env:
       TARGET_TRIPLET: x86_64-unknown-linux-gnu
       NLLB_SOURCE_REPO: https://github.com/AstonWilliams/Metal-CoreMLwhisper.cpp-build.git
+      SPEAKSHIFT_LICENSE_PUBLIC_KEY_B64: c8jYXlpk8bFV5WggseDoLgg5Q0Ujf/+vTp+kMnzeiic=
 
     steps:
       - name: Checkout

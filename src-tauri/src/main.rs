@@ -3,6 +3,7 @@
 
 use anyhow::Result;
 use base64::Engine;
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use futures_util::StreamExt;
 use hound::{SampleFormat, WavReader};
 use reqwest::Client;
@@ -229,10 +230,12 @@ fn extract_zip(zip_path: &Path, target_dir: &Path) -> Result<(), String> {
 
 #[tauri::command]
 async fn batch_get_runtime_limits(
+    app: AppHandle,
     model_name: String,
     acceleration: Option<String>,
     requested_parallel: Option<u16>,
 ) -> Result<BatchRuntimeLimits, String> {
+    ensure_feature_unlocked(&app, "Batch transcription")?;
     let mut sys = System::new_all();
     sys.refresh_memory();
 
@@ -335,6 +338,7 @@ async fn batch_expand_source(
     source_type: String,
     download_dir: Option<String>,
 ) -> Result<BatchSourceExpandResult, String> {
+    ensure_feature_unlocked(&app, "Batch transcription")?;
     let source = source_type.to_ascii_lowercase();
     let mut warnings = Vec::new();
 
@@ -431,7 +435,8 @@ async fn batch_expand_source(
 }
 
 #[tauri::command]
-fn batch_prepare_queue_output(base_output: String, queue_name: String) -> Result<String, String> {
+fn batch_prepare_queue_output(app: AppHandle, base_output: String, queue_name: String) -> Result<String, String> {
+    ensure_feature_unlocked(&app, "Batch transcription")?;
     let safe_name = sanitize_queue_name(&queue_name);
     let queue_dir = PathBuf::from(base_output).join(safe_name);
     fs::create_dir_all(&queue_dir)
@@ -440,7 +445,8 @@ fn batch_prepare_queue_output(base_output: String, queue_name: String) -> Result
 }
 
 #[tauri::command]
-fn batch_write_text_file(path: String, content: String) -> Result<(), String> {
+fn batch_write_text_file(app: AppHandle, path: String, content: String) -> Result<(), String> {
+    ensure_feature_unlocked(&app, "Batch transcription")?;
     let target = PathBuf::from(path);
     if let Some(parent) = target.parent() {
         fs::create_dir_all(parent)
@@ -450,7 +456,8 @@ fn batch_write_text_file(path: String, content: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn batch_write_bytes_file(path: String, bytes: Vec<u8>) -> Result<(), String> {
+fn batch_write_bytes_file(app: AppHandle, path: String, bytes: Vec<u8>) -> Result<(), String> {
+    ensure_feature_unlocked(&app, "Batch transcription")?;
     let target = PathBuf::from(path);
     if let Some(parent) = target.parent() {
         fs::create_dir_all(parent)
@@ -471,15 +478,26 @@ fn get_models_dir(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
+fn normalize_whisper_model_filename(model_name: &str) -> String {
+    let trimmed = model_name.trim().to_ascii_lowercase();
+
+    if trimmed.starts_with("ggml-") {
+        if trimmed.ends_with(".bin") {
+            trimmed
+        } else {
+            format!("{}.bin", trimmed)
+        }
+    } else if trimmed.ends_with(".bin") {
+        format!("ggml-{}", trimmed)
+    } else {
+        format!("ggml-{}.bin", trimmed)
+    }
+}
+
 async fn download_model(app: AppHandle, model_name: &str) -> Result<PathBuf, String> {
     let models_dir = get_models_dir(&app).map_err(|e| e.to_string())?;
 
-    // IMPORTANT: Do NOT add "ggml-" again if it's already in model_name
-    let filename = if model_name.starts_with("ggml-") {
-        model_name.to_string()
-    } else {
-        format!("ggml-{}.bin", model_name)
-    };
+    let filename = normalize_whisper_model_filename(model_name);
 
     let target_path = models_dir.join(&filename);
 
@@ -610,7 +628,7 @@ async fn download_youtube_video(url: String) -> Result<String, String> {
 #[tauri::command]
 async fn delete_whisper_model(app: AppHandle, model_name: String) -> Result<(), String> {
     let models_dir = get_models_dir(&app).map_err(|e| e.to_string())?;
-    let file_path = models_dir.join(format!("ggml-{}.bin", model_name));
+    let file_path = models_dir.join(normalize_whisper_model_filename(&model_name));
 
     if !file_path.exists() {
         return Err("Model file not found".to_string());
@@ -710,7 +728,7 @@ async fn transcribe_media(
 
     // 2. Run whisper-cli using tokio::process::Command
     let model_path = get_models_dir(&app)?
-        .join(format!("ggml-{}.bin", model_name.to_lowercase()))
+        .join(normalize_whisper_model_filename(&model_name))
         .to_string_lossy()
         .to_string();
 
@@ -800,10 +818,8 @@ async fn transcribe_wav(
         return Err("File must be a .wav file".to_string());
     }
 
-    let model_path = get_models_dir(&app)?
-        .join(format!("ggml-{}.bin", model_name.to_lowercase()))
-        .to_string_lossy()
-        .to_string();
+    // Ensure model exists for recording workflows as well (auto-download if missing).
+    let model_path = ensure_whisper_model(app.clone(), model_name.clone()).await?;
 
     if !Path::new(&model_path).exists() {
         return Err(format!("Model not found: {}", model_path));
@@ -1140,12 +1156,23 @@ async fn transcribe_path(
     println!("[DEBUG] transcribe_path STARTED | file_path: {}", file_path);
     println!("[DEBUG] model: {}", model_name);
 
-    let limits = batch_get_runtime_limits(model_name.clone(), acceleration.clone(), Some(1)).await?;
-    if limits.free_ram_mib <= limits.reserve_ram_mib + limits.model_estimated_ram_mib / 2 {
+    let mut sys = System::new_all();
+    sys.refresh_memory();
+
+    let free_ram_mib = sys.available_memory() / (1024 * 1024);
+    let model_estimated_ram_mib = estimate_whisper_ram_mib(&model_name);
+    let reserve_ram_mib = 1_024u64;
+    let logical_cores = std::thread::available_parallelism()
+        .map(|n| n.get() as u16)
+        .unwrap_or(2)
+        .max(1);
+    let recommended_threads_per_item = logical_cores.clamp(1, 8);
+
+    if free_ram_mib <= reserve_ram_mib + model_estimated_ram_mib / 2 {
         return Err(format!(
             "Not enough free RAM for safe transcription. Free: {} MiB, required estimate: {} MiB",
-            limits.free_ram_mib,
-            limits.model_estimated_ram_mib
+            free_ram_mib,
+            model_estimated_ram_mib
         ));
     }
 
@@ -1164,15 +1191,15 @@ async fn transcribe_path(
         .to_ascii_lowercase();
 
     let mut worker_threads = threads
-        .unwrap_or(limits.recommended_threads_per_item)
-        .clamp(1, limits.logical_cores.max(1));
+        .unwrap_or(recommended_threads_per_item)
+        .clamp(1, logical_cores.max(1));
 
     if accel_mode.contains("cpu-safe") {
         worker_threads = worker_threads.min(2);
     } else if accel_mode.contains("balanced") {
         worker_threads = worker_threads.min(4);
     } else if accel_mode.contains("aggressive") {
-        worker_threads = worker_threads.max((limits.logical_cores / 2).max(1));
+        worker_threads = worker_threads.max((logical_cores / 2).max(1));
     }
 
     let ffmpeg_output = Command::new(&ffmpeg_bin)
@@ -1806,6 +1833,7 @@ async fn diarize_speakers(
     app: AppHandle,
     audio_path: String,
 ) -> Result<Vec<DiarizedSegment>, String> {
+    ensure_feature_unlocked(&app, "Diarization")?;
     println!("[DIARIZE] Starting on: {}", audio_path);
 
     // Get current model name
@@ -3230,6 +3258,7 @@ async fn translate_text(
     beam: Option<u32>,
     max_new_tokens: Option<u32>,
 ) -> Result<TranslationResult, String> {
+    ensure_feature_unlocked(&app, "Translation")?;
     if text.trim().is_empty() {
         return Err("No text to translate".to_string());
     }
@@ -5241,6 +5270,8 @@ async fn parakeet_transcribe_and_diarize(
     force_cpu: Option<bool>,
     task_id: Option<String>,
 ) -> Result<ParakeetTranscribeDiarizeResult, QwenCommandError> {
+    ensure_feature_unlocked(&app, "Diarization")
+        .map_err(|e| QwenCommandError::new(QwenErrorCode::InvalidInput, e).with_stage("license"))?;
     parakeet_transcribe_and_diarize_impl(&app, &media_path, model_dir, force_cpu, &task_id).await
 }
 
@@ -5251,6 +5282,7 @@ async fn parakeet_diarize_then_transcribe_segments(
     model_dir: Option<String>,
     force_cpu: Option<bool>,
 ) -> Result<ParakeetTranscribeDiarizeResult, String> {
+    ensure_feature_unlocked(&app, "Diarization")?;
     let input = PathBuf::from(&media_path);
     if !input.exists() {
         return Err(format!("Input media path does not exist: {}", media_path));
@@ -6850,6 +6882,278 @@ fn get_sidecar_path(
     ))
 }
 
+const OFFLINE_LICENSE_PUBLIC_KEY_B64: &str =
+    match option_env!("SPEAKSHIFT_LICENSE_PUBLIC_KEY_B64") {
+        Some(v) => v,
+        None => "REPLACE_WITH_YOUR_ED25519_PUBLIC_KEY_BASE64",
+    };
+
+#[derive(serde::Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct OfflineLicensePayload {
+    schema_version: u8,
+    plan: String,
+    buyer_name: String,
+    buyer_email: String,
+    license_id: String,
+    issued_at: i64,
+    perpetual: bool,
+}
+
+#[derive(serde::Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct SignedOfflineLicense {
+    payload: OfflineLicensePayload,
+    signature: String,
+}
+
+#[derive(serde::Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct StoredOfflineLicense {
+    schema_version: u8,
+    activated_at: i64,
+    signed_license: SignedOfflineLicense,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OfflineLicenseStatus {
+    is_pro: bool,
+    plan: String,
+    buyer_name: Option<String>,
+    buyer_email: Option<String>,
+    license_id: Option<String>,
+    activated_at: Option<i64>,
+    message: String,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EntitlementStatus {
+    is_pro: bool,
+    plan: String,
+    locked_features: Vec<String>,
+    message: String,
+}
+
+fn now_unix_seconds() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+fn get_license_state_root(app: &AppHandle) -> Result<PathBuf, String> {
+    let base = env::var("USERPROFILE")
+        .or_else(|_| env::var("HOME"))
+        .ok()
+        .map(PathBuf::from)
+        .or_else(|| app.path().app_config_dir().ok())
+        .or_else(|| app.path().app_local_data_dir().ok())
+        .ok_or_else(|| "Failed to resolve writable user directory for license state".to_string())?;
+
+    let dir = base.join(".speakshift").join("license");
+    fs::create_dir_all(&dir)
+        .map_err(|e| format!("Failed to create license state directory {}: {}", dir.display(), e))?;
+    Ok(dir)
+}
+
+fn get_offline_license_file(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(get_license_state_root(app)?.join("offline_license.json"))
+}
+
+fn evaluate_entitlement(app: &AppHandle) -> Result<EntitlementStatus, String> {
+    let is_pro = match get_offline_license_status(app.clone()) {
+        Ok(status) => status.is_pro,
+        Err(_) => false,
+    };
+
+    let message = if is_pro {
+        "Pro unlocked".to_string()
+    } else {
+        "Free tier active. Enter your offline Pro key in Profile to unlock Batch, Diarization, and Translation."
+            .to_string()
+    };
+
+    Ok(EntitlementStatus {
+        is_pro,
+        plan: if is_pro { "pro".to_string() } else { "free".to_string() },
+        locked_features: if is_pro {
+            Vec::new()
+        } else {
+            vec![
+                "Batch transcription".to_string(),
+                "Diarization".to_string(),
+                "Translation".to_string(),
+            ]
+        },
+        message,
+    })
+}
+
+fn ensure_feature_unlocked(app: &AppHandle, feature_name: &str) -> Result<(), String> {
+    let entitlement = evaluate_entitlement(app)?;
+    if entitlement.is_pro {
+        return Ok(());
+    }
+
+    Err(format!(
+        "{} is a Pro feature. Enter a valid offline Pro key in Profile > Offline Pro Activation to unlock.",
+        feature_name
+    ))
+}
+
+#[tauri::command]
+fn get_entitlement_status(app: AppHandle) -> Result<EntitlementStatus, String> {
+    evaluate_entitlement(&app)
+}
+
+fn decode_b64_any(input: &str) -> Result<Vec<u8>, String> {
+    base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(input)
+        .or_else(|_| base64::engine::general_purpose::STANDARD.decode(input))
+        .map_err(|e| format!("Base64 decode failed: {}", e))
+}
+
+fn verify_signed_offline_license(signed: &SignedOfflineLicense) -> Result<(), String> {
+    if OFFLINE_LICENSE_PUBLIC_KEY_B64.starts_with("REPLACE_WITH_") {
+        return Err("Offline license public key is not configured in the app binary".to_string());
+    }
+
+    let pubkey_vec = decode_b64_any(OFFLINE_LICENSE_PUBLIC_KEY_B64)?;
+    let pubkey_bytes: [u8; 32] = pubkey_vec
+        .try_into()
+        .map_err(|_| "Invalid public key length; expected 32 bytes".to_string())?;
+    let verify_key =
+        VerifyingKey::from_bytes(&pubkey_bytes).map_err(|e| format!("Invalid public key: {}", e))?;
+
+    let sig_vec = decode_b64_any(&signed.signature)?;
+    let sig_bytes: [u8; 64] = sig_vec
+        .try_into()
+        .map_err(|_| "Invalid signature length; expected 64 bytes".to_string())?;
+    let signature = Signature::from_bytes(&sig_bytes);
+
+    let payload_bytes = serde_json::to_vec(&signed.payload)
+        .map_err(|e| format!("Failed to serialize license payload: {}", e))?;
+    verify_key
+        .verify(&payload_bytes, &signature)
+        .map_err(|_| "License signature verification failed".to_string())?;
+
+    if !signed.payload.perpetual {
+        return Err("Only perpetual offline licenses are accepted".to_string());
+    }
+    if signed.payload.plan.to_ascii_lowercase() != "pro" {
+        return Err("License plan is not Pro".to_string());
+    }
+
+    Ok(())
+}
+
+fn parse_signed_license_key(raw_key: &str) -> Result<SignedOfflineLicense, String> {
+    let mut token = raw_key.trim().to_string();
+    if token.starts_with("SS1-") {
+        token = token[4..].to_string();
+    }
+
+    let bytes = decode_b64_any(&token)?;
+    let json = String::from_utf8(bytes).map_err(|e| format!("License token is not valid UTF-8: {}", e))?;
+    serde_json::from_str::<SignedOfflineLicense>(&json)
+        .map_err(|e| format!("License token JSON is invalid: {}", e))
+}
+
+fn to_free_status(message: &str) -> OfflineLicenseStatus {
+    OfflineLicenseStatus {
+        is_pro: false,
+        plan: "free".to_string(),
+        buyer_name: None,
+        buyer_email: None,
+        license_id: None,
+        activated_at: None,
+        message: message.to_string(),
+    }
+}
+
+#[tauri::command]
+fn get_offline_license_status(app: AppHandle) -> Result<OfflineLicenseStatus, String> {
+    let license_file = get_offline_license_file(&app)?;
+    if !license_file.exists() {
+        return Ok(to_free_status("No offline license activated"));
+    }
+
+    let content = fs::read_to_string(&license_file)
+        .map_err(|e| format!("Failed to read offline license file: {}", e))?;
+    let stored: StoredOfflineLicense = serde_json::from_str(&content)
+        .map_err(|e| format!("Offline license file is invalid JSON: {}", e))?;
+
+    verify_signed_offline_license(&stored.signed_license)?;
+
+    Ok(OfflineLicenseStatus {
+        is_pro: true,
+        plan: stored.signed_license.payload.plan.clone(),
+        buyer_name: Some(stored.signed_license.payload.buyer_name.clone()),
+        buyer_email: Some(stored.signed_license.payload.buyer_email.clone()),
+        license_id: Some(stored.signed_license.payload.license_id.clone()),
+        activated_at: Some(stored.activated_at),
+        message: "Offline Pro license active".to_string(),
+    })
+}
+
+#[tauri::command]
+fn activate_offline_license(
+    app: AppHandle,
+    license_key: String,
+    name: String,
+    email: String,
+) -> Result<OfflineLicenseStatus, String> {
+    let entered_name = name.trim();
+    let entered_email = email.trim();
+    if entered_name.is_empty() || entered_email.is_empty() {
+        return Err("Name and email are required for offline activation".to_string());
+    }
+
+    let signed = parse_signed_license_key(&license_key)?;
+    verify_signed_offline_license(&signed)?;
+
+    if !signed
+        .payload
+        .buyer_name
+        .trim()
+        .eq_ignore_ascii_case(entered_name)
+    {
+        return Err("Entered name does not match the license".to_string());
+    }
+    if !signed
+        .payload
+        .buyer_email
+        .trim()
+        .eq_ignore_ascii_case(entered_email)
+    {
+        return Err("Entered email does not match the license".to_string());
+    }
+
+    let stored = StoredOfflineLicense {
+        schema_version: 1,
+        activated_at: now_unix_seconds(),
+        signed_license: signed.clone(),
+    };
+
+    let file_path = get_offline_license_file(&app)?;
+    let json = serde_json::to_string_pretty(&stored)
+        .map_err(|e| format!("Failed to serialize offline license: {}", e))?;
+    fs::write(&file_path, json)
+        .map_err(|e| format!("Failed to write offline license file: {}", e))?;
+
+    Ok(OfflineLicenseStatus {
+        is_pro: true,
+        plan: signed.payload.plan,
+        buyer_name: Some(signed.payload.buyer_name),
+        buyer_email: Some(signed.payload.buyer_email),
+        license_id: Some(signed.payload.license_id),
+        activated_at: Some(stored.activated_at),
+        message: "Offline activation successful".to_string(),
+    })
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_fs::init())
@@ -6950,6 +7254,9 @@ fn main() {
             batch_prepare_queue_output,
             batch_write_text_file,
             batch_write_bytes_file,
+            get_offline_license_status,
+            activate_offline_license,
+            get_entitlement_status,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

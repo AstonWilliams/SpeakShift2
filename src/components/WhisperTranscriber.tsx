@@ -123,6 +123,8 @@ interface TranscriptionResult {
   error?: string;
 }
 
+type ExportFormat = "srt" | "vtt" | "txt" | "json" | "csv" | "md";
+
 const LANGUAGES = [
   { code: "auto", name: "Auto Detect" },
   { code: "en", name: "English" },
@@ -159,6 +161,7 @@ export default function WhisperTranscriber({ file, initialFilePath = null, initi
   const [status, setStatus] = useState("Ready to begin...");
   const [error, setError] = useState<string | null>(null);
   const [copyStatus, setCopyStatus] = useState<"idle" | "copied">("idle");
+  const [exportFormat, setExportFormat] = useState<ExportFormat>("srt");
   // const [isDragOver, setIsDragOver] = useState(false);
 
   const parentRef = useRef<HTMLDivElement>(null);
@@ -352,6 +355,99 @@ export default function WhisperTranscriber({ file, initialFilePath = null, initi
     else showToast("Failed to save SRT file", "error");
   };
 
+  const exportCurrentFormat = async () => {
+    if (!transcription?.segments?.length) {
+      alert("No transcription available to export yet.");
+      return;
+    }
+
+    if (exportFormat === "srt") {
+      await exportAsSRT();
+      return;
+    }
+
+    const baseName = `${selectedFileName.replace(/\.[^/.]+$/, "") || "transcription"}`;
+
+    if (exportFormat === "txt") {
+      const text = transcription.segments.map((s) => s.text.trim()).join("\n\n");
+      const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+      const ok = await saveBlobWithPicker(blob, `${baseName}.txt`, { "text/plain": [".txt"] });
+      if (ok) showToast("Saved TXT file", "success");
+      else showToast("Failed to save TXT file", "error");
+      return;
+    }
+
+    if (exportFormat === "vtt") {
+      const vttTime = (ms: number) => formatTimestamp(ms).replace(",", ".");
+      let body = "WEBVTT\n\n";
+      transcription.segments.forEach((seg, index) => {
+        body += `${index + 1}\n`;
+        body += `${vttTime(seg.start_ms)} --> ${vttTime(seg.end_ms)}\n`;
+        body += `${seg.text.trim()}\n\n`;
+      });
+      const blob = new Blob([body], { type: "text/vtt;charset=utf-8" });
+      const ok = await saveBlobWithPicker(blob, `${baseName}.vtt`, { "text/vtt": [".vtt"] });
+      if (ok) showToast("Saved VTT file", "success");
+      else showToast("Failed to save VTT file", "error");
+      return;
+    }
+
+    if (exportFormat === "json") {
+      const jsonData = {
+        filename: selectedFileName,
+        transcription: {
+          full_text: transcription.full_text || "",
+          segments: transcription.segments.map((seg) => ({
+            start: seg.start_ms / 1000,
+            end: seg.end_ms / 1000,
+            text: seg.text.trim(),
+          })),
+          detected_language: transcription.detected_language,
+          model_used: selectedModel,
+        },
+        exported_at: new Date().toISOString(),
+      };
+
+      const blob = new Blob([JSON.stringify(jsonData, null, 2)], {
+        type: "application/json;charset=utf-8",
+      });
+      const ok = await saveBlobWithPicker(blob, `${baseName}.json`, {
+        "application/json": [".json"],
+      });
+      if (ok) showToast("Saved JSON file", "success");
+      else showToast("Failed to save JSON file", "error");
+      return;
+    }
+
+    if (exportFormat === "csv") {
+      let csv = "Index,Start,End,Text\n";
+      transcription.segments.forEach((seg, index) => {
+        const text = seg.text.trim().replace(/"/g, '""');
+        csv += `"${index + 1}","${(seg.start_ms / 1000).toFixed(3)}","${(seg.end_ms / 1000).toFixed(3)}","${text}"\n`;
+      });
+      const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+      const ok = await saveBlobWithPicker(blob, `${baseName}.csv`, { "text/csv": [".csv"] });
+      if (ok) showToast("Saved CSV file", "success");
+      else showToast("Failed to save CSV file", "error");
+      return;
+    }
+
+    if (exportFormat === "md") {
+      let md = `# Transcription - ${selectedFileName}\n\n`;
+      md += `- Model: ${selectedModel}\n`;
+      md += `- Language: ${selectedLanguage}\n`;
+      md += `- Exported: ${new Date().toLocaleString()}\n\n`;
+      transcription.segments.forEach((seg, i) => {
+        md += `## Segment ${i + 1} (${formatTimestamp(seg.start_ms)} -> ${formatTimestamp(seg.end_ms)})\n\n`;
+        md += `${seg.text.trim()}\n\n`;
+      });
+      const blob = new Blob([md], { type: "text/markdown;charset=utf-8" });
+      const ok = await saveBlobWithPicker(blob, `${baseName}.md`, { "text/markdown": [".md"] });
+      if (ok) showToast("Saved Markdown file", "success");
+      else showToast("Failed to save Markdown file", "error");
+    }
+  };
+
   // Helper to show save dialog when available, otherwise fallback to link download
   const saveBlobWithPicker = async (blob: Blob, fileName: string, accept?: Record<string, string[]>) => {
     // Try native File System Access API first
@@ -515,7 +611,7 @@ export default function WhisperTranscriber({ file, initialFilePath = null, initi
             </div>
             <div
               ref={parentRef}
-              className="p-6 pr-4 max-h-[640px] w-full overflow-auto"
+              className="p-6 pr-4 max-h-160 w-full overflow-auto"
               style={{ contain: "strict" }}
             >
             </div>
@@ -597,7 +693,7 @@ export default function WhisperTranscriber({ file, initialFilePath = null, initi
                     e.stopPropagation();
                     pickFile();
                   }}
-                  className="px-10 py-5 bg-gradient-to-r from-gray-900 to-black text-white dark:from-gray-100 dark:to-white dark:text-black rounded-2xl font-bold text-lg hover:scale-105 active:scale-95 transition-all shadow-xl"
+                  className="px-10 py-5 bg-linear-to-r from-gray-900 to-black text-white dark:from-gray-100 dark:to-white dark:text-black rounded-2xl font-bold text-lg hover:scale-105 active:scale-95 transition-all shadow-xl"
                 >
                   Select File
                 </button>
@@ -687,10 +783,10 @@ export default function WhisperTranscriber({ file, initialFilePath = null, initi
           onClick={startTranscription}
           disabled={isProcessing || (!selectedFile && !selectedFilePath)}
           className={`
-          w-full py-7 rounded-[32px] text-xl font-black flex items-center justify-center gap-4 transition-all shadow-xl
+          w-full py-7 rounded-4xl text-xl font-black flex items-center justify-center gap-4 transition-all shadow-xl
           ${isProcessing || (!selectedFile && !selectedFilePath)
               ? "bg-zinc-400 text-white cursor-not-allowed"
-              : "bg-gradient-to-r from-pink-600 to-pink-700 hover:from-pink-700 hover:to-pink-800 text-white hover:scale-[1.02] active:scale-95"
+              : "bg-linear-to-r from-pink-600 to-pink-700 hover:from-pink-700 hover:to-pink-800 text-white hover:scale-[1.02] active:scale-95"
             }
         `}
         >
@@ -740,7 +836,7 @@ export default function WhisperTranscriber({ file, initialFilePath = null, initi
         {/* Error */}
         {error && (
           <div className="mt-6 p-5 bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-800 rounded-2xl text-red-700 dark:text-red-300 flex gap-3 items-start">
-            <AlertTriangle className="w-6 h-6 flex-shrink-0 mt-1" />
+            <AlertTriangle className="w-6 h-6 shrink-0 mt-1" />
             <div>
               <p className="font-bold">Error</p>
               <p className="text-sm mt-1">{error}</p>
@@ -780,7 +876,7 @@ export default function WhisperTranscriber({ file, initialFilePath = null, initi
                 ref={parentRef}
                 className={`
                 px-7 py-6
-                max-h-[55vh] min-h-[240px]
+                max-h-[55vh] min-h-60
                 overflow-y-auto overscroll-contain
                 scrollbar-thin scrollbar-thumb-zinc-700 scrollbar-track-transparent
                 scrollbar-thumb-rounded
@@ -819,7 +915,7 @@ export default function WhisperTranscriber({ file, initialFilePath = null, initi
                         </div>
                         {/* Text with subtle pink left accent */}
                         <div className="flex gap-4 items-start">
-                          <div className="flex-shrink-0 mt-0.5">
+                          <div className="shrink-0 mt-0.5">
                             <span className="
                             text-lg font-bold text-pink-500/70
                             opacity-80 group-hover:opacity-100 transition-opacity
@@ -830,7 +926,7 @@ export default function WhisperTranscriber({ file, initialFilePath = null, initi
                           <p className="
                           flex-1 pl-2 border-l-2 border-pink-500/30
                           leading-[1.68] text-[15.5px] text-zinc-100
-                          break-words hyphens-auto
+                          wrap-break-word hyphens-auto
                         ">
                             {seg.text.trim()}
                           </p>
@@ -844,13 +940,27 @@ export default function WhisperTranscriber({ file, initialFilePath = null, initi
 
             {/* Action buttons */}
             <div className="flex flex-col sm:flex-row gap-4 px-2">
-              <button
-                onClick={exportAsSRT}
-                className="flex-1 bg-gradient-to-r from-pink-600 to-pink-700 hover:from-pink-700 hover:to-pink-800 text-white py-4 rounded-[24px] font-bold text-sm flex items-center justify-center gap-2 transition-all shadow-md"
-              >
-                <Download className="w-5 h-5" />
-                Export SRT
-              </button>
+              <div className="flex-1 flex gap-2">
+                <select
+                  value={exportFormat}
+                  onChange={(e) => setExportFormat(e.target.value as ExportFormat)}
+                  className="px-4 py-4 rounded-3xl bg-zinc-800 text-white border border-zinc-700 font-semibold"
+                >
+                  <option value="srt">SRT</option>
+                  <option value="vtt">VTT</option>
+                  <option value="txt">TXT</option>
+                  <option value="json">JSON</option>
+                  <option value="csv">CSV</option>
+                  <option value="md">MD</option>
+                </select>
+                <button
+                  onClick={exportCurrentFormat}
+                  className="flex-1 bg-linear-to-r from-pink-600 to-pink-700 hover:from-pink-700 hover:to-pink-800 text-white py-4 rounded-3xl font-bold text-sm flex items-center justify-center gap-2 transition-all shadow-md"
+                >
+                  <Download className="w-5 h-5" />
+                  Export {exportFormat.toUpperCase()}
+                </button>
+              </div>
               <button
                 onClick={async () => {
                   if (!transcription?.segments?.length) return;
@@ -864,7 +974,7 @@ export default function WhisperTranscriber({ file, initialFilePath = null, initi
                     showToast("Failed to copy text", "error");
                   }
                 }}
-                className="flex-1 bg-zinc-800 py-6 rounded-[32px] font-black hover:bg-zinc-700 transition-all disabled:opacity-50"
+                className="flex-1 bg-zinc-800 py-6 rounded-4xl font-black hover:bg-zinc-700 transition-all disabled:opacity-50"
                 disabled={copyStatus === "copied"}
               >
                 {copyStatus === "copied" ? (
@@ -890,238 +1000,5 @@ export default function WhisperTranscriber({ file, initialFilePath = null, initi
       </div>
     </motion.div>
   );
-
-  const exportAsTXT = async () => {
-    if (!transcription?.segments?.length) {
-      alert("No transcription available to export yet.");
-      return;
-    }
-
-    const text = transcription.segments.map(s => s.text.trim()).join('\n\n');
-    const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
-    const fileName = `${selectedFileName.replace(/\.[^/.]+$/, "") || "transcription"}.txt`;
-
-    const ok = await saveBlobWithPicker(blob, fileName, { "text/plain": [".txt"] });
-    if (ok) showToast("Saved TXT file", "success");
-    else showToast("Failed to save TXT file", "error");
-  };
-
-  const exportAsMarkdown = async () => {
-    if (!transcription?.segments?.length) {
-      alert("No transcription available to export yet.");
-      return;
-    }
-
-    let md = `# Transcription - ${selectedFileName}\n\n`;
-    md += `**Model:** ${selectedModel}  \n`;
-    md += `**Language:** ${selectedLanguage}  \n`;
-    md += `**Exported:** ${new Date().toLocaleString()}\n\n`;
-
-    transcription.segments.forEach((seg, i) => {
-      const start = formatTimestamp(seg.start_ms);
-      const end = formatTimestamp(seg.end_ms);
-      md += `## Segment ${i + 1} — ${start} → ${end}\n\n`;
-      md += `${seg.text.trim()}\n\n`;
-    });
-
-    const blob = new Blob([md], { type: "text/markdown;charset=utf-8" });
-    const fileName = `${selectedFileName.replace(/\.[^/.]+$/, "") || "transcription"}.md`;
-
-    const ok = await saveBlobWithPicker(blob, fileName, { "text/markdown": [".md"] });
-    if (ok) showToast("Saved Markdown file", "success");
-    else showToast("Failed to save Markdown file", "error");
-  };
-
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    const sizeMB = file.size / (1024 * 1024);
-    setFileSizeMB(sizeMB);
-    setSelectedFile(file);
-    setSelectedFileName(file.name);
-    setError(null);
-    setTranscription(null);
-    setStatus("File selected — ready to transcribe");
-
-    e.target.value = "";
-  };
-
-  const forcePickPathAfterDrop = async () => {
-    if (!selectedFile) return; // safety
-
-    showToast("Large/secure file processing → please select the same file again", "info");
-
-    try {
-      const selected = await open({
-        title: "Select the same file to continue",
-        filters: [
-          {
-            name: "Audio & Video",
-            extensions: ["mp3", "wav", "m4a", "ogg", "flac", "mp4", "mkv", "webm", "mov"]
-          }
-        ],
-        multiple: false,
-        directory: false
-      });
-
-      if (!selected) {
-        setError("File selection cancelled");
-        showToast("Selection cancelled", "info");
-        return;
-      }
-
-      const path = Array.isArray(selected) ? selected[0] : selected;
-
-      // Verify it's probably the same file (optional – nice UX)
-      if (!path.includes(selectedFileName.split('.')[0])) {
-        if (!confirm("Selected file name doesn't match the dropped one. Continue anyway?")) {
-          return;
-        }
-      }
-
-      const name = path.split(/[\\/]/).pop() || selectedFileName;
-
-      let sizeMB = 0;
-      try {
-        const bytes = await invoke<number>("get_file_size", { path });
-        sizeMB = bytes / (1024 * 1024);
-      } catch { }
-
-      setSelectedFilePath(path);
-      setSelectedFileName(name);
-      setFileSizeMB(sizeMB);
-      setError(null);
-      showToast("File path ready! You can now transcribe.", "success");
-
-    } catch (err) {
-      console.error("Forced picker failed:", err);
-      setError("Failed to get file path");
-      showToast("Cannot continue without file path", "error");
-    }
-  };
-
-  const exportAsVTT = async () => {
-    if (!transcription?.segments?.length) {
-      alert("No transcription available to export yet.");
-      return;
-    }
-
-    let vtt = "WEBVTT\n\n";
-    transcription.segments.forEach((seg, index) => {
-      const startTime = new Date(seg.start_ms).toISOString().substr(11, 12);
-      const endTime = new Date(seg.end_ms).toISOString().substr(11, 12);
-      vtt += `${index + 1}\n`;
-      vtt += `${startTime} --> ${endTime}\n`;
-      vtt += `${seg.text.trim()}\n\n`;
-    });
-
-    const blob = new Blob([vtt], { type: "text/plain;charset=utf-8" });
-    const fileName = `${selectedFileName.replace(/\.[^/.]+$/, "") || "transcription"}.vtt`;
-
-    const ok = await saveBlobWithPicker(blob, fileName, { "text/plain": [".vtt"] });
-    if (ok) showToast("Saved VTT file", "success");
-    else showToast("Failed to save VTT file", "error");
-  };
-
-  const exportAsJSON = async () => {
-    if (!transcription?.segments?.length) {
-      alert("No transcription available to export yet.");
-      return;
-    }
-
-    const jsonData = {
-      filename: selectedFileName,
-      transcription: {
-        full_text: transcription.full_text || "",
-        segments: transcription.segments.map(seg => ({
-          start: seg.start_ms / 1000,
-          end: seg.end_ms / 1000,
-          text: seg.text.trim()
-        })),
-        detected_language: transcription.detected_language,
-        model_used: selectedModel
-      },
-      exported_at: new Date().toISOString()
-    };
-
-    const blob = new Blob([JSON.stringify(jsonData, null, 2)], { type: "application/json;charset=utf-8" });
-    const fileName = `${selectedFileName.replace(/\.[^/.]+$/, "") || "transcription"}.json`;
-
-    const ok = await saveBlobWithPicker(blob, fileName, { "application/json": [".json"] });
-    if (ok) showToast("Saved JSON file", "success");
-    else showToast("Failed to save JSON file", "error");
-  };
-
-  const exportAsCSV = async () => {
-    if (!transcription?.segments?.length) {
-      alert("No transcription available to export yet.");
-      return;
-    }
-
-    let csv = "Start Time,End Time,Text\n";
-    transcription.segments.forEach((seg) => {
-      const startTime = (seg.start_ms / 1000).toFixed(2);
-      const endTime = (seg.end_ms / 1000).toFixed(2);
-      const text = seg.text.trim().replace(/"/g, '""'); // Escape quotes
-      csv += `"${startTime}","${endTime}","${text}"\n`;
-    });
-
-    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
-    const fileName = `${selectedFileName.replace(/\.[^/.]+$/, "") || "transcription"}.csv`;
-
-    const ok = await saveBlobWithPicker(blob, fileName, { "text/csv": [".csv"] });
-    if (ok) showToast("Saved CSV file", "success");
-    else showToast("Failed to save CSV file", "error");
-  };
-
-  const exportAsDOCX = async () => {
-    if (!transcription?.segments?.length) {
-      alert("No transcription available to export yet.");
-      return;
-    }
-
-    // Create a simple HTML document that can be opened in Word
-    let html = `<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="utf-8">
-    <title>Transcription - ${selectedFileName}</title>
-    <style>
-        body { font-family: Arial, sans-serif; margin: 40px; }
-        .segment { margin-bottom: 20px; }
-        .timestamp { color: #666; font-size: 12px; margin-bottom: 5px; }
-        .text { line-height: 1.5; }
-    </style>
-</head>
-<body>
-    <h1>Transcription: ${selectedFileName}</h1>
-    <p><strong>Model:</strong> ${selectedModel}</p>
-    <p><strong>Language:</strong> ${selectedLanguage}</p>
-    <p><strong>Exported:</strong> ${new Date().toLocaleString()}</p>
-    <hr>
-`;
-
-    transcription.segments.forEach((seg, index) => {
-      const startTime = new Date(seg.start_ms).toISOString().substr(11, 8);
-      const endTime = new Date(seg.end_ms).toISOString().substr(11, 8);
-      html += `
-    <div class="segment">
-        <div class="timestamp">${index + 1}. ${startTime} - ${endTime}</div>
-        <div class="text">${seg.text.trim()}</div>
-    </div>`;
-    });
-
-    html += `
-</body>
-</html>`;
-
-    const blob = new Blob([html], { type: "application/vnd.ms-word;charset=utf-8" });
-    const fileName = `${selectedFileName.replace(/\.[^/.]+$/, "") || "transcription"}.docx`;
-
-    const ok = await saveBlobWithPicker(blob, fileName, { "application/vnd.ms-word": [".docx"] });
-    if (ok) showToast("Saved DOCX file", "success");
-    else showToast("Failed to save DOCX file", "error");
-  };
 }
 
