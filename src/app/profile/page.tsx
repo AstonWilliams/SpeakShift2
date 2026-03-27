@@ -56,7 +56,7 @@ export default function ProfilePage() {
     message: "Free tier active",
   });
   const t = useTranslations();
-  const appVersion = process.env.NEXT_PUBLIC_APP_VERSION ?? "v1.0.0";
+  const appVersion = process.env.NEXT_PUBLIC_APP_VERSION ?? "v2.1.0";
 
   useEffect(() => {
     const init = async () => {

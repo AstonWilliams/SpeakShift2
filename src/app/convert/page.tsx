@@ -1,22 +1,21 @@
 "use client";
 
 import { useState, useRef, useEffect } from "react";
-import { motion, AnimatePresence } from "framer-motion";
+import { motion } from "framer-motion";
 import {
   Upload,
   Scissors,
-  ArrowRight,
-  Download,
-  Loader2,
-  X,
-  Plus,
-  ChevronDown,
   Settings2,
   Video
 } from "lucide-react";
 import dynamic from "next/dynamic";
 import { useTranslations } from "next-intl";
+import { open } from "@tauri-apps/plugin-dialog";
+import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import OnboardingCard from "@/components/OnboardingCard";
+
+const VIDEO_FILE_EXTENSIONS = ["mp4", "mov", "mkv", "webm", "avi", "m4v"];
 
 const videoEditingSteps = [
   {
@@ -56,26 +55,178 @@ export default function ConvertPage() {
   const t = useTranslations();
   const [mounted, setMounted] = useState(false);
   const [file, setFile] = useState<File | null>(null);
-  const [isProcessing, setIsProcessing] = useState(false);
-  const [status, setStatus] = useState("idle");
+  const [isDragOver, setIsDragOver] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const [step, setStep] = useState(0);
 
   const handleNext = () => {
-    if (step < videoEditingSteps.length - 1) {
-      setStep(step + 1);
-    }
+    setStep((prev) => Math.min(prev + 1, videoEditingSteps.length));
   };
 
-  if (step >= videoEditingSteps.length) return null;
+  const isVideoFile = (picked: File) => {
+    if (picked.type.startsWith("video/")) {
+      return true;
+    }
 
-  const current = videoEditingSteps[step];
+    const ext = picked.name.split(".").pop()?.toLowerCase() ?? "";
+    return VIDEO_FILE_EXTENSIONS.includes(ext);
+  };
+
+  const isSupportedVideoPath = (path: string) => {
+    const ext = path.split(".").pop()?.toLowerCase() || "";
+    return VIDEO_FILE_EXTENSIONS.includes(ext);
+  };
+
+  const handleFilePicked = (picked: File | null | undefined) => {
+    if (!picked) return;
+    if (!isVideoFile(picked)) return;
+    setFile(picked);
+  };
+
+  const loadVideoFromPath = async (path: string) => {
+    const bytes = await invoke<number[]>("get_processed_file_bytes", { path });
+    const uint8 = new Uint8Array(bytes);
+    const filename = path.split(/[\\/]/).pop() || "video.mp4";
+    const ext = filename.split(".").pop()?.toLowerCase() || "mp4";
+    const mime =
+      ext === "mov" ? "video/quicktime"
+        : ext === "webm" ? "video/webm"
+          : ext === "mkv" ? "video/x-matroska"
+            : "video/mp4";
+
+    const picked = new File([uint8], filename, { type: mime });
+    setFile(picked);
+  };
+
+  const openWithSystemDialog = async () => {
+    try {
+      const selected = await open({
+        title: "Select video",
+        filters: [
+          { name: "Video", extensions: VIDEO_FILE_EXTENSIONS },
+        ],
+        multiple: false,
+        directory: false,
+      });
+
+      if (!selected || typeof selected !== "string") {
+        return;
+      }
+
+      await loadVideoFromPath(selected);
+    } catch (error) {
+      console.error("Failed to open video via native dialog", error);
+      fileInputRef.current?.click();
+    }
+  };
 
   useEffect(() => {
     setMounted(true);
   }, []);
 
+  useEffect(() => {
+    let dragDepth = 0;
+
+    const onDragEnter = (event: DragEvent) => {
+      event.preventDefault();
+      dragDepth += 1;
+      setIsDragOver(true);
+    };
+
+    const onDragOver = (event: DragEvent) => {
+      event.preventDefault();
+      setIsDragOver(true);
+    };
+
+    const onDragLeave = (event: DragEvent) => {
+      event.preventDefault();
+      dragDepth = Math.max(0, dragDepth - 1);
+      if (dragDepth === 0) {
+        setIsDragOver(false);
+      }
+    };
+
+    const onDrop = (event: DragEvent) => {
+      event.preventDefault();
+      dragDepth = 0;
+      setIsDragOver(false);
+
+      const droppedFile = event.dataTransfer?.files?.[0] ?? null;
+      handleFilePicked(droppedFile);
+    };
+
+    document.addEventListener("dragenter", onDragEnter);
+    document.addEventListener("dragover", onDragOver);
+    document.addEventListener("dragleave", onDragLeave);
+    document.addEventListener("drop", onDrop);
+
+    return () => {
+      document.removeEventListener("dragenter", onDragEnter);
+      document.removeEventListener("dragover", onDragOver);
+      document.removeEventListener("dragleave", onDragLeave);
+      document.removeEventListener("drop", onDrop);
+    };
+  }, []);
+
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+
+    const subscribe = async () => {
+      try {
+        const appWindow = getCurrentWindow();
+        unlisten = await appWindow.onDragDropEvent((event) => {
+          if (event.payload.type === "enter" || event.payload.type === "over") {
+            setIsDragOver(true);
+            return;
+          }
+
+          if (event.payload.type === "leave") {
+            setIsDragOver(false);
+            return;
+          }
+
+          if (event.payload.type === "drop") {
+            setIsDragOver(false);
+            const path = event.payload.paths?.[0];
+            if (!path || !isSupportedVideoPath(path)) {
+              return;
+            }
+
+            void loadVideoFromPath(path);
+          }
+        });
+      } catch (err) {
+        console.error("Failed to attach Tauri drag-drop listener:", err);
+      }
+    };
+
+    void subscribe();
+
+    return () => {
+      if (unlisten) unlisten();
+    };
+  }, []);
+
+  const handleDrop = (event: React.DragEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setIsDragOver(false);
+
+    const droppedFile = event.dataTransfer?.files?.[0] ?? null;
+    handleFilePicked(droppedFile);
+  };
+
+  const handleDrag = (event: React.DragEvent<HTMLDivElement>, over: boolean) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setIsDragOver(over);
+  };
+
   if (!mounted) return null;
+
+  const showOnboarding = step < videoEditingSteps.length;
+  const current = showOnboarding ? videoEditingSteps[step] : null;
 
   const features = [
     { title: t("Smart Crop"), desc: t("Smart Crop desc"), icon: Scissors },
@@ -87,16 +238,18 @@ export default function ConvertPage() {
     <div className="min-h-screen p-8 lg:p-12">
       <header className="mb-12">
         <h1 className="text-5xl font-black tracking-tight mb-4">{t("Video Converter h1")}</h1>
-        <p className="text-xl text-zinc-500 font-medium">{t("Video Converter desc")}</p>
+        <p className="text-xl text-zinc-700 dark:text-zinc-300 font-medium">{t("Video Converter desc")}</p>
       </header>
-      <OnboardingCard
-        id={current.id}
-        title={current.title}
-        description={current.description}
-        imageSrc={current.imageSrc}
-        buttonText={current.buttonText}
-        onFinish={handleNext}
-      />
+      {current && (
+        <OnboardingCard
+          id={current.id}
+          title={current.title}
+          description={current.description}
+          imageSrc={current.imageSrc}
+          buttonText={current.buttonText}
+          onFinish={handleNext}
+        />
+      )}
       <main className="max-w-6xl">
         {!file ? (
           <motion.div
@@ -104,29 +257,49 @@ export default function ConvertPage() {
             animate={{ opacity: 1, y: 0 }}
             className="group relative"
           >
-            <div className="absolute inset-0 bg-pink-100/20 blur-3xl group-hover:bg-pink-100/40 transition-colors rounded-[64px]" />
             <div
-              className="relative aspect-video lg:aspect-[21/9] border-4 border-dashed border-zinc-200 dark:border-zinc-800 rounded-[64px] flex flex-col items-center justify-center gap-6 cursor-pointer hover:border-pink-300 dark:hover:border-pink-900 transition-all bg-white/50 dark:bg-zinc-900/50 backdrop-blur-sm"
-              onClick={() => document.getElementById("file-upload")?.click()}
+              className={`absolute inset-0 rounded-[64px] blur-3xl pointer-events-none transition-colors duration-500 ${isDragOver ? "bg-blue-500/30" : "bg-blue-100/10 group-hover:bg-blue-100/30"
+                }`}
+            />
+            <div
+              role="button"
+              tabIndex={0}
+              className={`relative aspect-video lg:aspect-21/9 border-4 border-dashed rounded-[64px] flex flex-col items-center justify-center gap-8 transition-all duration-300 cursor-pointer focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-blue-400/40 ${isDragOver
+                ? "border-blue-500 bg-blue-950/40 scale-[1.015] shadow-2xl ring-4 ring-blue-500/40"
+                : "border-zinc-300 dark:border-zinc-700 hover:border-blue-400 dark:hover:border-blue-600 bg-white/60 dark:bg-zinc-900/60 backdrop-blur-md"
+                }`}
+              onClick={() => void openWithSystemDialog()}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  void openWithSystemDialog();
+                }
+              }}
+              onDragEnter={(e) => handleDrag(e, true)}
+              onDragOver={(e) => handleDrag(e, true)}
+              onDragLeave={(e) => handleDrag(e, false)}
+              onDrop={handleDrop}
+              aria-label={t("Drop your video here")}
             >
-              <div className="w-20 h-20 bg-white dark:bg-zinc-800 rounded-3xl flex items-center justify-center shadow-xl group-hover:scale-110 transition-transform">
-                <Upload className="w-10 h-10 text-pink-500" />
+              <div className={`w-24 h-24 rounded-3xl flex items-center justify-center shadow-xl transition-transform duration-300 ${isDragOver ? "scale-110 bg-blue-600" : "bg-white dark:bg-zinc-800"}`}>
+                <Upload className={`w-12 h-12 ${isDragOver ? "text-white" : "text-blue-500"}`} />
               </div>
-              <div className="text-center">
-                <p className="text-2xl font-black mb-2">{t("Drop your video here")}</p>
-                <p className="text-zinc-400 font-bold">MP4, MOV, WEBM {t("up to 2GB")}</p>
+              <div className="text-center px-6">
+                <p className="text-3xl font-black mb-3">{isDragOver ? "Drop now!" : t("Drop your video here")}</p>
+                <p className="text-lg text-zinc-600 dark:text-zinc-400 font-medium">MP4, MOV, MKV, WEBM, AVI, M4V {t("up to 2GB")}</p>
+                <p className="text-sm text-zinc-500 dark:text-zinc-400 mt-2">Click to browse</p>
               </div>
-              <input
-                id="file-upload"
-                type="file"
-                className="hidden"
-                accept="video/*"
-                onChange={(e) => {
-                  const f = e.target.files?.[0];
-                  if (f) setFile(f);
-                }}
-              />
             </div>
+            <input
+              ref={fileInputRef}
+              id="file-upload"
+              type="file"
+              className="hidden"
+              accept="video/*"
+              onChange={(e) => {
+                handleFilePicked(e.target.files?.[0]);
+              }}
+            />
           </motion.div>
         ) : (
           <FFmpegWrapper file={file} onCancel={() => setFile(null)} />
@@ -139,7 +312,7 @@ export default function ConvertPage() {
                 <feature.icon className="w-6 h-6 text-pink-500" />
               </div>
               <h3 className="text-xl font-bold mb-2">{feature.title}</h3>
-              <p className="text-zinc-500 dark:text-zinc-400 font-medium leading-relaxed">{feature.desc}</p>
+              <p className="text-zinc-700 dark:text-zinc-300 font-medium leading-relaxed">{feature.desc}</p>
             </div>
           ))}
         </div>

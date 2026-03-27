@@ -48,6 +48,43 @@ jobs:
           mkdir -p src-tauri/binaries
           mkdir -p src-tauri/binaries/whisper
 
+      - name: Determine CUDA architectures for whisper
+        run: |
+          set -euo pipefail
+
+          if ! command -v nvcc >/dev/null 2>&1; then
+            echo "::error::nvcc was not found on PATH. CUDA toolkit must be installed on this self-hosted runner."
+            exit 1
+          fi
+
+          NVCC_VERSION_RAW="$(nvcc --version | sed -n 's/.*release \([0-9]\+\)\.\([0-9]\+\).*/\1 \2/p' | head -n1)"
+          if [ -z "${NVCC_VERSION_RAW}" ]; then
+            echo "::error::Failed to parse CUDA version from nvcc --version"
+            nvcc --version || true
+            exit 1
+          fi
+
+          CUDA_MAJOR="$(echo "${NVCC_VERSION_RAW}" | awk '{print $1}')"
+          CUDA_MINOR="$(echo "${NVCC_VERSION_RAW}" | awk '{print $2}')"
+
+          if [ "${CUDA_MAJOR}" -lt 12 ] || { [ "${CUDA_MAJOR}" -eq 12 ] && [ "${CUDA_MINOR}" -lt 8 ]; }; then
+            echo "::error::CUDA ${CUDA_MAJOR}.${CUDA_MINOR} is too old. CUDA >= 12.8 is required for modern RTX 50+ coverage."
+            exit 1
+          fi
+
+          # 30-series -> 86, 40-series -> 89, 50-series -> 120a/121a.
+          # Add 130 virtual when available for better future forward compatibility.
+          WHISPER_CUDA_ARCHS="86-real;89-real;90-virtual;120a-real"
+          if [ "${CUDA_MAJOR}" -gt 12 ] || { [ "${CUDA_MAJOR}" -eq 12 ] && [ "${CUDA_MINOR}" -ge 9 ]; }; then
+            WHISPER_CUDA_ARCHS="${WHISPER_CUDA_ARCHS};121a-real"
+          fi
+          if [ "${CUDA_MAJOR}" -ge 13 ]; then
+            WHISPER_CUDA_ARCHS="${WHISPER_CUDA_ARCHS};130-virtual"
+          fi
+
+          echo "WHISPER_CUDA_ARCHS=${WHISPER_CUDA_ARCHS}" >> "${GITHUB_ENV}"
+          echo "Using whisper CUDA architectures: ${WHISPER_CUDA_ARCHS}"
+
       - name: Build ffmpeg sidecar
         run: |
           git clone --depth 1 https://github.com/FFmpeg/FFmpeg.git ffmpeg-src
@@ -62,7 +99,7 @@ jobs:
       - name: Build whisper.cpp sidecar (CUDA)
         run: |
           git clone --depth 1 https://github.com/ggml-org/whisper.cpp.git whisper-src
-          cmake -S whisper-src -B whisper-src/build -DCMAKE_BUILD_TYPE=Release -DGGML_CUDA=ON
+          cmake -S whisper-src -B whisper-src/build -DCMAKE_BUILD_TYPE=Release -DGGML_CUDA=ON -DGGML_NATIVE=OFF -DCMAKE_CUDA_ARCHITECTURES="${WHISPER_CUDA_ARCHS}"
           cmake --build whisper-src/build --config Release -j"$(nproc)"
           cp whisper-src/build/bin/whisper-cli src-tauri/binaries/whisper/whisper-cli-${TARGET_TRIPLET}
           chmod +x src-tauri/binaries/whisper/whisper-cli-${TARGET_TRIPLET}

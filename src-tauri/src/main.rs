@@ -13,9 +13,10 @@ use serde_json::Value;
 use std::env;
 use std::fs;
 use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
 use std::io::BufReader;
+use std::io::BufRead;
 use std::io::Cursor;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -1645,7 +1646,6 @@ use parakeet_rs::{
 use parakeet_rs::sortformer::{
     DiarizationConfig, Sortformer, SpeakerSegment as ParakeetSpeakerSegment,
 };
-use std::sync::{Arc, Mutex};
 
 // Keep the same output format for frontend compatibility
 #[derive(serde::Serialize)]
@@ -2401,6 +2401,19 @@ async fn transcribe_recording(
 // Struct for all command arguments with defaults
 // ──────────────────────────────────────────────────────────────
 #[derive(Deserialize)]
+struct FfmpegTextOverlay {
+    text: String,
+    #[serde(default)]
+    x_pct: f64,
+    #[serde(default)]
+    y_pct: f64,
+    #[serde(default)]
+    size_rel: f64,
+    #[serde(default)]
+    color: String,
+}
+
+#[derive(Deserialize)]
 struct ProcessFfmpegArgs {
     input_bytes: Vec<u8>,
     output_type: String, // "video" | "audio"
@@ -2425,6 +2438,79 @@ struct ProcessFfmpegArgs {
     dehummer: bool,
     #[serde(default = "default_color_filter")]
     color_filter: String, // none | grayscale | sepia | vignette
+    #[serde(default)]
+    text_overlays: Vec<FfmpegTextOverlay>,
+}
+
+fn escape_ffmpeg_drawtext_text(text: &str) -> String {
+    text.replace('\\', "\\\\")
+        .replace(':', "\\:")
+        .replace(',', "\\,")
+        .replace(';', "\\;")
+        .replace('"', "\\\"")
+        .replace('\'', "\\'")
+        .replace('%', "\\%")
+        .replace('\n', " ")
+}
+
+fn escape_ffmpeg_drawtext_fontfile(path: &str) -> String {
+    path.replace('\\', "/")
+        .replace(':', "\\:")
+        .replace('"', "\\\"")
+        .replace('\'', "\\'")
+        .replace(',', "\\,")
+        .replace(';', "\\;")
+}
+
+fn resolve_drawtext_fontfile() -> Option<String> {
+    let candidates: &[&str] = if cfg!(target_os = "windows") {
+        &[
+            "C:/Windows/Fonts/seguiemj.ttf",
+            "C:/Windows/Fonts/segoeui.ttf",
+            "C:/Windows/Fonts/arial.ttf",
+        ]
+    } else if cfg!(target_os = "macos") {
+        &[
+            "/System/Library/Fonts/Apple Color Emoji.ttc",
+            "/System/Library/Fonts/Supplemental/Arial.ttf",
+            "/System/Library/Fonts/Supplemental/Helvetica.ttc",
+        ]
+    } else {
+        &[
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        ]
+    };
+
+    for candidate in candidates {
+        if Path::new(candidate).exists() {
+            return Some(candidate.to_string());
+        }
+    }
+
+    None
+}
+
+fn sanitize_drawtext_color(input: &str) -> String {
+    let trimmed = input.trim();
+
+    if trimmed.starts_with('#') {
+        let hex = &trimmed[1..];
+        if (hex.len() == 6 || hex.len() == 8) && hex.chars().all(|c| c.is_ascii_hexdigit()) {
+            return format!("0x{}", hex);
+        }
+    }
+
+    if !trimmed.is_empty()
+        && trimmed
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+    {
+        return trimmed.to_ascii_lowercase();
+    }
+
+    "white".to_string()
 }
 
 // Default value functions
@@ -2469,6 +2555,7 @@ async fn process_ffmpeg(app: AppHandle, payload: ProcessFfmpegArgs) -> Result<St
         denoise,
         dehummer,
         color_filter,
+        text_overlays,
     } = payload;
 
     // 1. Create temp directory
@@ -2548,7 +2635,7 @@ async fn process_ffmpeg(app: AppHandle, payload: ProcessFfmpegArgs) -> Result<St
             _ => "1920:1080",
         };
         vf.push(format!(
-            "scale={}:force_original_aspect_ratio=decrease,pad={}: (ow-iw)/2:(oh-ih)/2",
+            "scale={}:force_original_aspect_ratio=decrease,pad={}:(ow-iw)/2:(oh-ih)/2",
             res, res
         ));
     }
@@ -2564,15 +2651,52 @@ async fn process_ffmpeg(app: AppHandle, payload: ProcessFfmpegArgs) -> Result<St
         vf.push(format!("crop=ih*({}):ih", ratio));
     }
 
+    let drawtext_fontfile_arg = if output_type == "video" && !text_overlays.is_empty() {
+        let fontfile = resolve_drawtext_fontfile().ok_or_else(|| {
+            "No usable system font file found for text overlays. Install a standard system font or disable overlays."
+                .to_string()
+        })?;
+        Some(format!(
+            ":fontfile='{}'",
+            escape_ffmpeg_drawtext_fontfile(&fontfile)
+        ))
+    } else {
+        None
+    };
+
+    if output_type == "video" {
+        let font_arg = drawtext_fontfile_arg.as_deref().unwrap_or("");
+
+        for overlay in text_overlays.iter() {
+            let raw_text = overlay.text.trim();
+            if raw_text.is_empty() {
+                continue;
+            }
+
+            let text = escape_ffmpeg_drawtext_text(raw_text);
+            let x = overlay.x_pct.clamp(0.02, 0.98);
+            let y = overlay.y_pct.clamp(0.02, 0.98);
+            let size_rel = overlay.size_rel.clamp(0.03, 0.26);
+            let color = sanitize_drawtext_color(&overlay.color);
+
+            vf.push(format!(
+                "drawtext=text='{}'{}:x=(w*{:.4})-(text_w/2):y=(h*{:.4})-(text_h/2):fontsize=h*{:.4}:fontcolor={}:borderw=2:bordercolor=black@0.6",
+                text, font_arg, x, y, size_rel, color
+            ));
+        }
+    }
+
     // ── Audio Filters ──
     if volume != 1.0 {
         af.push(format!("volume={}", volume));
     }
     if denoise {
-        af.push("afftdn=nr=12:nf=-30".to_string()); // stronger noise reduction
+        // Conservative settings reduce noise while avoiding metallic artifacts.
+        af.push("afftdn=nr=8:nf=-25:tn=1".to_string());
     }
     if dehummer {
-        af.push("highpass=f=120,lowpass=f=3000".to_string());
+        // Avoid aggressive low-pass filtering that muffles voices.
+        af.push("highpass=f=80".to_string());
     }
 
     if !vf.is_empty() {
@@ -2631,14 +2755,21 @@ async fn process_ffmpeg(app: AppHandle, payload: ProcessFfmpegArgs) -> Result<St
                     "-c:v".to_string(),
                     "libx264".to_string(),
                     "-preset".to_string(),
-                    if quality == "high" { "slow" } else { "fast" }.to_string(),
+                    if quality == "high" {
+                        "medium"
+                    } else if quality == "medium" {
+                        "veryfast"
+                    } else {
+                        "ultrafast"
+                    }
+                    .to_string(),
                 ]);
                 let crf = if quality == "high" {
-                    "18"
+                    "20"
                 } else if quality == "medium" {
-                    "23"
+                    "24"
                 } else {
-                    "28"
+                    "29"
                 };
                 args.extend(["-crf".to_string(), crf.to_string()]);
             }
@@ -2683,17 +2814,29 @@ async fn process_ffmpeg(app: AppHandle, payload: ProcessFfmpegArgs) -> Result<St
         .spawn()
         .map_err(|e| format!("FFmpeg spawn failed: {}", e))?;
 
-    if let Some(mut stderr) = child.stderr.take() {
+    let stderr_capture = Arc::new(Mutex::new(String::new()));
+    let mut stderr_thread = None;
+
+    if let Some(stderr) = child.stderr.take() {
         let app_clone = app.clone();
-        std::thread::spawn(move || {
-            let mut buf = [0u8; 1024];
+        let stderr_capture_clone = Arc::clone(&stderr_capture);
+        stderr_thread = Some(std::thread::spawn(move || {
+            let mut reader = BufReader::new(stderr);
+            let mut line = String::new();
+
             loop {
-                match stderr.read(&mut buf) {
+                line.clear();
+
+                match reader.read_line(&mut line) {
                     Ok(0) => break,
-                    Ok(n) => {
-                        let output = String::from_utf8_lossy(&buf[0..n]);
-                        if let Some(time_pos) = output.find("time=") {
-                            let time_str = &output[time_pos + 5..time_pos + 16];
+                    Ok(_) => {
+                        if let Ok(mut captured) = stderr_capture_clone.lock() {
+                            captured.push_str(&line);
+                        }
+
+                        if let Some(time_pos) = line.find("time=") {
+                            let end = (time_pos + 16).min(line.len());
+                            let time_str = &line[time_pos + 5..end];
                             let parts: Vec<&str> = time_str.split(':').collect();
                             if parts.len() == 3 {
                                 let h: f64 = parts[0].parse().unwrap_or(0.0);
@@ -2705,24 +2848,42 @@ async fn process_ffmpeg(app: AppHandle, payload: ProcessFfmpegArgs) -> Result<St
                                 } else {
                                     0
                                 };
-                                let _ = app_clone
-                                    .emit("ffmpeg-progress", json!({"progress": progress}));
+
+                                let _ = app_clone.emit(
+                                    "ffmpeg-progress",
+                                    json!({"progress": progress.min(100)}),
+                                );
                             }
                         }
                     }
                     Err(_) => break,
                 }
             }
-        });
+        }));
     }
 
     let output = child
         .wait_with_output()
         .map_err(|e| format!("FFmpeg wait failed: {}", e))?;
 
+    if let Some(handle) = stderr_thread {
+        let _ = handle.join();
+    }
+
     if !output.status.success() {
-        let err = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("FFmpeg failed:\n{}", err.trim()));
+        let mut err = String::from_utf8_lossy(&output.stderr).trim().to_string();
+
+        if err.is_empty() {
+            if let Ok(captured) = stderr_capture.lock() {
+                err = captured.trim().to_string();
+            }
+        }
+
+        if err.is_empty() {
+            err = "Unknown FFmpeg failure (no stderr output captured).".to_string();
+        }
+
+        return Err(format!("FFmpeg failed:\n{}", err));
     }
 
     // 7. Cleanup input file (keep output for preview/download)
@@ -2815,7 +2976,7 @@ async fn create_video_preview(
         .map_err(|e| format!("Failed to write temp input: {}", e))?;
 
     let preview_id = Uuid::new_v4().simple().to_string();
-    let output_filename = format!("preview-{}.webm", preview_id);
+    let output_filename = format!("preview-{}.mp4", preview_id);
     let output_path = previews_dir.join(&output_filename);
 
     let ffmpeg_bin = get_ffmpeg_path(&app)?;
@@ -2843,7 +3004,7 @@ async fn create_video_preview(
 
     let vf_filter = vf.join(",");
 
-    let mut args = vec![
+    let args = vec![
         "-y".to_string(),
         "-i".to_string(),
         input_temp.to_string_lossy().into(),
@@ -2855,11 +3016,15 @@ async fn create_video_preview(
         "h264_nvenc".to_string(), // Try NVIDIA GPU first
         "-preset".to_string(),
         "p4".to_string(),
-        "-b:v".to_string(),
-        "2M".to_string(),
+        "-cq".to_string(),
+        "30".to_string(),
+        "-pix_fmt".to_string(),
+        "yuv420p".to_string(),
+        "-movflags".to_string(),
+        "+faststart".to_string(),
         "-an".to_string(),
         "-f".to_string(),
-        "webm".to_string(),
+        "mp4".to_string(),
         output_path.to_string_lossy().into(),
     ];
 
@@ -2871,8 +3036,8 @@ async fn create_video_preview(
             fs::read(&output_path).map_err(|e| format!("Failed to read preview: {}", e))?
         }
         _ => {
-            eprintln!("[PREVIEW] NVENC unavailable → fallback to VP9");
-            let mut fallback_args = vec![
+            eprintln!("[PREVIEW] NVENC unavailable → fallback to x264 ultrafast");
+            let fallback_args = vec![
                 "-y".to_string(),
                 "-i".to_string(),
                 input_temp.to_string_lossy().into(),
@@ -2881,20 +3046,18 @@ async fn create_video_preview(
                 "-vf".to_string(),
                 vf_filter,
                 "-c:v".to_string(),
-                "libvpx-vp9".to_string(),
-                "-b:v".to_string(),
-                "1M".to_string(),
-                "-cpu-used".to_string(),
-                "4".to_string(),
-                "-row-mt".to_string(),
-                "1".to_string(),
-                "-tile-columns".to_string(),
-                "2".to_string(),
-                "-frame-parallel".to_string(),
-                "1".to_string(),
+                "libx264".to_string(),
+                "-preset".to_string(),
+                "ultrafast".to_string(),
+                "-crf".to_string(),
+                "32".to_string(),
+                "-pix_fmt".to_string(),
+                "yuv420p".to_string(),
+                "-movflags".to_string(),
+                "+faststart".to_string(),
                 "-an".to_string(),
                 "-f".to_string(),
-                "webm".to_string(),
+                "mp4".to_string(),
                 output_path.to_string_lossy().into(),
             ];
 

@@ -50,9 +50,16 @@
       "binaries/nllb-translation",
       "binaries/yt-dlp"
     ],
-    "resources": [
-      "binaries/onnx_runtime",
-      "binaries/whisper"
-    ]
+    "resources": {
+      "binaries/onnx_runtime/onnxruntime.dll": "onnxruntime.dll",
+      "binaries/onnx_runtime/onnxruntime_providers_shared.dll": "onnxruntime_providers_shared.dll",
+      "binaries/onnx_runtime/onnxruntime_providers_cuda.dll": "onnxruntime_providers_cuda.dll",
+      "binaries/onnx_runtime/onnxruntime_providers_tensorrt.dll": "onnxruntime_providers_tensorrt.dll",
+      "binaries/whisper/ggml-base.dll": "ggml-base.dll",
+      "binaries/whisper/ggml-cpu.dll": "ggml-cpu.dll",
+      "binaries/whisper/ggml-cuda.dll": "ggml-cuda.dll",
+      "binaries/whisper/ggml.dll": "ggml.dll",
+      "binaries/whisper/whisper.dll": "whisper.dll"
+    }
   }
 }
