@@ -41,7 +41,7 @@ jobs:
       - name: Setup CUDA toolkit
         uses: Jimver/cuda-toolkit@v0.2.24
         with:
-          cuda: '12.9.1'
+          cuda: '13.2'
 
       - name: Configure Windows build environment
         shell: pwsh
@@ -76,41 +76,43 @@ jobs:
               $cudaRoot = Get-ChildItem $cudaBase -Directory | Sort-Object Name -Descending | Select-Object -First 1 -ExpandProperty FullName
             }
           }
-          if ($cudaRoot) {
-            "CUDA_TOOLKIT_ROOT_DIR=$cudaRoot" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-            "$cudaRoot\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
-
-            $nvccPath = Join-Path $cudaRoot 'bin\nvcc.exe'
-            if (-not (Test-Path $nvccPath)) {
-              throw "nvcc.exe not found at $nvccPath"
-            }
-
-            $nvccOutput = & $nvccPath --version | Out-String
-            $releaseMatch = [regex]::Match($nvccOutput, 'release\s+(\d+)\.(\d+)')
-            if (-not $releaseMatch.Success) {
-              throw "Failed to parse CUDA version from nvcc output: $nvccOutput"
-            }
-
-            $cudaMajor = [int]$releaseMatch.Groups[1].Value
-            $cudaMinor = [int]$releaseMatch.Groups[2].Value
-
-            if ($cudaMajor -lt 12 -or ($cudaMajor -eq 12 -and $cudaMinor -lt 8)) {
-              throw "CUDA $cudaMajor.$cudaMinor is too old. CUDA >= 12.8 is required for modern RTX 50+ coverage."
-            }
-
-            # 30-series -> 86, 40-series -> 89, 50-series -> 120a/121a.
-            # Add 130 virtual when available for better future forward compatibility.
-            $whisperCudaArchs = "86-real;89-real;90-virtual;120a-real"
-            if ($cudaMajor -gt 12 -or ($cudaMajor -eq 12 -and $cudaMinor -ge 9)) {
-              $whisperCudaArchs = "$whisperCudaArchs;121a-real"
-            }
-            if ($cudaMajor -ge 13) {
-              $whisperCudaArchs = "$whisperCudaArchs;130-virtual"
-            }
-
-            "WHISPER_CUDA_ARCHS=$whisperCudaArchs" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-            Write-Host "Using whisper CUDA architectures: $whisperCudaArchs"
+          if (-not $cudaRoot) {
+            throw 'CUDA toolkit root could not be resolved from CUDA_PATH or default install path'
           }
+
+          "CUDA_TOOLKIT_ROOT_DIR=$cudaRoot" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "$cudaRoot\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+
+          $nvccPath = Join-Path $cudaRoot 'bin\nvcc.exe'
+          if (-not (Test-Path $nvccPath)) {
+            throw "nvcc.exe not found at $nvccPath"
+          }
+
+          $nvccOutput = & $nvccPath --version | Out-String
+          $releaseMatch = [regex]::Match($nvccOutput, 'release\s+(\d+)\.(\d+)')
+          if (-not $releaseMatch.Success) {
+            throw "Failed to parse CUDA version from nvcc output: $nvccOutput"
+          }
+
+          $cudaMajor = [int]$releaseMatch.Groups[1].Value
+          $cudaMinor = [int]$releaseMatch.Groups[2].Value
+
+          if ($cudaMajor -lt 12 -or ($cudaMajor -eq 12 -and $cudaMinor -lt 8)) {
+            throw "CUDA $cudaMajor.$cudaMinor is too old. CUDA >= 12.8 is required for modern RTX 50+ coverage."
+          }
+
+          # 30-series -> 86, 40-series -> 89, 50-series -> 120a/121a.
+          # Add 130 virtual when available for better future forward compatibility.
+          $whisperCudaArchs = "86-real;89-real;90-virtual;120a-real"
+          if ($cudaMajor -gt 12 -or ($cudaMajor -eq 12 -and $cudaMinor -ge 9)) {
+            $whisperCudaArchs = "$whisperCudaArchs;121a-real"
+          }
+          if ($cudaMajor -ge 13) {
+            $whisperCudaArchs = "$whisperCudaArchs;130-virtual"
+          }
+
+          "WHISPER_CUDA_ARCHS=$whisperCudaArchs" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "Using whisper CUDA architectures: $whisperCudaArchs"
 
           $staticCrtFlag = '-C target-feature=+crt-static'
           if ([string]::IsNullOrWhiteSpace($env:RUSTFLAGS)) {
