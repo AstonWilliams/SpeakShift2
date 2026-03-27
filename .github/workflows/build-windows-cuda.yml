@@ -41,7 +41,7 @@ jobs:
       - name: Setup CUDA toolkit
         uses: Jimver/cuda-toolkit@v0.2.24
         with:
-          cuda: '13.2'
+          cuda: '13.2.0'
 
       - name: Configure Windows build environment
         shell: pwsh
