@@ -78,243 +78,263 @@ jobs:
           RELEASE_TAG: ${{ github.event.inputs.release_tag }}
           PLATFORM_HINT: ${{ matrix.platform_hint }}
         run: |
-          python - <<'PY'
-          import json
-          import os
-          import pathlib
-          import re
-          import sys
-          import urllib.parse
-          import urllib.request
+          $script = @'
+import json
+import os
+import pathlib
+import re
+import sys
+import urllib.parse
+import urllib.request
 
-          repo = os.environ["RELEASE_REPO"]
-          tag = (os.environ.get("RELEASE_TAG") or "").strip()
-          platform_hint = os.environ["PLATFORM_HINT"].lower()
+repo = os.environ["RELEASE_REPO"]
+tag = (os.environ.get("RELEASE_TAG") or "").strip()
+platform_hint = os.environ["PLATFORM_HINT"].lower()
 
-          if tag:
-              api = f"https://api.github.com/repos/{repo}/releases/tags/{urllib.parse.quote(tag)}"
-          else:
-              api = f"https://api.github.com/repos/{repo}/releases/latest"
+if tag:
+    api = f"https://api.github.com/repos/{repo}/releases/tags/{urllib.parse.quote(tag)}"
+else:
+    api = f"https://api.github.com/repos/{repo}/releases/latest"
 
-          headers = {
-              "Accept": "application/vnd.github+json",
-              "User-Agent": "speakshift-benchmark-workflow",
-          }
-          token = os.environ.get("GH_TOKEN")
-          if token:
-              headers["Authorization"] = f"Bearer {token}"
+headers = {
+    "Accept": "application/vnd.github+json",
+    "User-Agent": "speakshift-benchmark-workflow",
+}
+token = os.environ.get("GH_TOKEN")
+if token:
+    headers["Authorization"] = f"Bearer {token}"
 
-          req = urllib.request.Request(api, headers=headers)
-          with urllib.request.urlopen(req) as resp:
-              release = json.loads(resp.read().decode("utf-8"))
+req = urllib.request.Request(api, headers=headers)
+with urllib.request.urlopen(req) as resp:
+    release = json.loads(resp.read().decode("utf-8"))
 
-          assets = release.get("assets", [])
-          if not assets:
-              raise SystemExit("No assets found in selected release")
+assets = release.get("assets", [])
+if not assets:
+    raise SystemExit("No assets found in selected release")
 
-          platform_keywords = {
-              "windows": ["windows", "win", "x86_64-pc-windows-msvc"],
-              "macos": ["macos", "darwin", "apple", "aarch64-apple-darwin"],
-          }
-          bin_keywords = ["whisper", "nllb", "ffmpeg", "binaries", "sidecar", "speakshift"]
+platform_keywords = {
+    "windows": ["windows", "win", "x86_64-pc-windows-msvc"],
+    "macos": ["macos", "darwin", "apple", "aarch64-apple-darwin"],
+}
+bin_keywords = ["whisper", "nllb", "ffmpeg", "binaries", "sidecar", "speakshift"]
 
-          selected = []
-          keys = platform_keywords[platform_hint]
-          for a in assets:
-              name = (a.get("name") or "").lower()
-              if not any(k in name for k in keys):
-                  continue
-              if not any(k in name for k in bin_keywords):
-                  continue
-              selected.append(a)
+selected = []
+keys = platform_keywords[platform_hint]
+for a in assets:
+    name = (a.get("name") or "").lower()
+    if not any(k in name for k in keys):
+        continue
+    if not any(k in name for k in bin_keywords):
+        continue
+    selected.append(a)
 
-          # Fallback: if strict filtering misses packaged assets, include all platform-matching archives.
-          if not selected:
-              for a in assets:
-                  name = (a.get("name") or "").lower()
-                  if any(k in name for k in keys) and any(name.endswith(ext) for ext in (".zip", ".tar.gz", ".tgz", ".exe", ".bin")):
-                      selected.append(a)
+# Fallback: if strict filtering misses packaged assets, include all platform-matching archives.
+if not selected:
+    for a in assets:
+        name = (a.get("name") or "").lower()
+        if any(k in name for k in keys) and any(name.endswith(ext) for ext in (".zip", ".tar.gz", ".tgz", ".exe", ".bin")):
+            selected.append(a)
 
-          if not selected:
-              names = "\n".join(sorted((a.get("name") or "") for a in assets))
-              raise SystemExit(f"No assets selected for platform={platform_hint}. Available assets:\n{names}")
+if not selected:
+    names = "\n".join(sorted((a.get("name") or "") for a in assets))
+    raise SystemExit(f"No assets selected for platform={platform_hint}. Available assets:\n{names}")
 
-          out_dir = pathlib.Path("bench/downloads")
-          out_dir.mkdir(parents=True, exist_ok=True)
+out_dir = pathlib.Path("bench/downloads")
+out_dir.mkdir(parents=True, exist_ok=True)
 
-          manifest = {
-              "release": {
-                  "id": release.get("id"),
-                  "tag_name": release.get("tag_name"),
-                  "name": release.get("name"),
-                  "html_url": release.get("html_url"),
-              },
-              "platform": platform_hint,
-              "selected_assets": [],
-          }
+manifest = {
+    "release": {
+        "id": release.get("id"),
+        "tag_name": release.get("tag_name"),
+        "name": release.get("name"),
+        "html_url": release.get("html_url"),
+    },
+    "platform": platform_hint,
+    "selected_assets": [],
+}
 
-          for a in selected:
-              url = a.get("browser_download_url")
-              name = a.get("name")
-              if not url or not name:
-                  continue
+for a in selected:
+    url = a.get("browser_download_url")
+    name = a.get("name")
+    if not url or not name:
+        continue
 
-              target = out_dir / name
-              print(f"Downloading: {name}")
-              req = urllib.request.Request(url, headers={"User-Agent": "speakshift-benchmark-workflow"})
-              with urllib.request.urlopen(req) as resp, open(target, "wb") as f:
-                  f.write(resp.read())
+    target = out_dir / name
+    print(f"Downloading: {name}")
+    req = urllib.request.Request(url, headers={"User-Agent": "speakshift-benchmark-workflow"})
+    with urllib.request.urlopen(req) as resp, open(target, "wb") as f:
+        f.write(resp.read())
 
-              manifest["selected_assets"].append({
-                  "name": name,
-                  "size": a.get("size"),
-                  "download_url": url,
-                  "path": str(target),
-              })
+    manifest["selected_assets"].append({
+        "name": name,
+        "size": a.get("size"),
+        "download_url": url,
+        "path": str(target),
+    })
 
-          with open(out_dir / "assets_manifest.json", "w", encoding="utf-8") as f:
-              json.dump(manifest, f, indent=2)
+with open(out_dir / "assets_manifest.json", "w", encoding="utf-8") as f:
+    json.dump(manifest, f, indent=2)
 
-          print(f"Downloaded {len(manifest['selected_assets'])} assets for {platform_hint}")
-          PY
+print(f"Downloaded {len(manifest['selected_assets'])} assets for {platform_hint}")
+'@
+
+          $tempPy = "bench/download_binaries.py"
+          $script | Out-File -FilePath $tempPy -Encoding utf8 -Force
+          python $tempPy
+          Remove-Item $tempPy -Force -ErrorAction SilentlyContinue
 
       - name: Extract downloaded assets
         shell: pwsh
         run: |
-          python - <<'PY'
-          import pathlib
-          import shutil
-          import tarfile
-          import zipfile
+          $script = @'
+import pathlib
+import shutil
+import tarfile
+import zipfile
 
-          src = pathlib.Path("bench/downloads")
-          dst = pathlib.Path("bench/extracted")
-          dst.mkdir(parents=True, exist_ok=True)
+src = pathlib.Path("bench/downloads")
+dst = pathlib.Path("bench/extracted")
+dst.mkdir(parents=True, exist_ok=True)
 
-          for p in src.iterdir():
-              if p.name == "assets_manifest.json":
-                  continue
-              if p.is_dir():
-                  continue
+for p in src.iterdir():
+    if p.name == "assets_manifest.json":
+        continue
+    if p.is_dir():
+        continue
 
-              target_dir = dst / p.stem
-              target_dir.mkdir(parents=True, exist_ok=True)
+    target_dir = dst / p.stem
+    target_dir.mkdir(parents=True, exist_ok=True)
 
-              name = p.name.lower()
-              if name.endswith(".zip"):
-                  with zipfile.ZipFile(p, "r") as zf:
-                      zf.extractall(target_dir)
-              elif name.endswith(".tar.gz") or name.endswith(".tgz"):
-                  with tarfile.open(p, "r:gz") as tf:
-                      tf.extractall(target_dir)
-              else:
-                  shutil.copy2(p, target_dir / p.name)
+    name = p.name.lower()
+    if name.endswith(".zip"):
+        with zipfile.ZipFile(p, "r") as zf:
+            zf.extractall(target_dir)
+    elif name.endswith(".tar.gz") or name.endswith(".tgz"):
+        with tarfile.open(p, "r:gz") as tf:
+            tf.extractall(target_dir)
+    else:
+        shutil.copy2(p, target_dir / p.name)
 
-          print("Extraction complete")
-          PY
+print("Extraction complete")
+'@
+
+          $tempPy = "bench/extract_assets.py"
+          $script | Out-File -FilePath $tempPy -Encoding utf8 -Force
+          python $tempPy
+          Remove-Item $tempPy -Force -ErrorAction SilentlyContinue
 
       - name: Resolve whisper, nllb, and ffmpeg binaries
         shell: pwsh
         env:
           PLATFORM_HINT: ${{ matrix.platform_hint }}
         run: |
-          python - <<'PY'
-          import fnmatch
-          import os
-          import pathlib
-          import stat
-          import sys
+          $script = @'
+import fnmatch
+import os
+import pathlib
+import stat
+import sys
 
-          root = pathlib.Path("bench/extracted")
-          platform_hint = os.environ["PLATFORM_HINT"].lower()
-          is_windows = platform_hint == "windows"
+root = pathlib.Path("bench/extracted")
+platform_hint = os.environ["PLATFORM_HINT"].lower()
+is_windows = platform_hint == "windows"
 
-            required_patterns = {
-              "WHISPER_BIN": ["whisper-cli*.exe", "whisper*.exe"] if is_windows else ["whisper-cli*", "whisper*"],
-              "NLLB_BIN": ["nllb-translation*.exe", "nllb*.exe"] if is_windows else ["nllb-translation*", "nllb*"],
-            }
-            optional_patterns = {
-              "FFMPEG_BIN": ["ffmpeg*.exe"] if is_windows else ["ffmpeg*"],
-            }
+required_patterns = {
+    "WHISPER_BIN": ["whisper-cli*.exe", "whisper*.exe"] if is_windows else ["whisper-cli*", "whisper*"],
+    "NLLB_BIN": ["nllb-translation*.exe", "nllb*.exe"] if is_windows else ["nllb-translation*", "nllb*"],
+}
+optional_patterns = {
+    "FFMPEG_BIN": ["ffmpeg*.exe"] if is_windows else ["ffmpeg*"],
+}
 
-          def find_best(globs):
-              candidates = []
-              for p in root.rglob("*"):
-                  if not p.is_file():
-                      continue
-                  name = p.name.lower()
-                  for g in globs:
-                      if fnmatch.fnmatch(name, g.lower()):
-                          candidates.append(p)
-                          break
+def find_best(globs):
+    candidates = []
+    for p in root.rglob("*"):
+        if not p.is_file():
+            continue
+        name = p.name.lower()
+        for g in globs:
+            if fnmatch.fnmatch(name, g.lower()):
+                candidates.append(p)
+                break
 
-              if not candidates:
-                  return None
+    if not candidates:
+        return None
 
-              # Prefer shortest path and explicit binary names.
-              candidates.sort(key=lambda x: (len(str(x)), str(x).lower()))
-              return candidates[0]
+    # Prefer shortest path and explicit binary names.
+    candidates.sort(key=lambda x: (len(str(x)), str(x).lower()))
+    return candidates[0]
 
-            resolved = {}
-            for env_name, globs in required_patterns.items():
-              found = find_best(globs)
-              if not found:
-                  raise SystemExit(f"Could not resolve {env_name} under {root}")
+resolved = {}
+for env_name, globs in required_patterns.items():
+    found = find_best(globs)
+    if not found:
+        raise SystemExit(f"Could not resolve {env_name} under {root}")
 
-              if not is_windows:
-                  mode = found.stat().st_mode
-                  found.chmod(mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    if not is_windows:
+        mode = found.stat().st_mode
+        found.chmod(mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
-              resolved[env_name] = str(found.resolve())
+    resolved[env_name] = str(found.resolve())
 
-            for env_name, globs in optional_patterns.items():
-              found = find_best(globs)
-              if not found:
-                print(f"Optional binary not found: {env_name}")
-                continue
+for env_name, globs in optional_patterns.items():
+    found = find_best(globs)
+    if not found:
+        print(f"Optional binary not found: {env_name}")
+        continue
 
-              if not is_windows:
-                mode = found.stat().st_mode
-                found.chmod(mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    if not is_windows:
+        mode = found.stat().st_mode
+        found.chmod(mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
-              resolved[env_name] = str(found.resolve())
+    resolved[env_name] = str(found.resolve())
 
-          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as f:
-              for k, v in resolved.items():
-                  f.write(f"{k}={v}\n")
+with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as f:
+    for k, v in resolved.items():
+        f.write(f"{k}={v}\n")
 
-          print("Resolved binaries:")
-          for k, v in resolved.items():
-              print(f"  {k} -> {v}")
-          PY
+print("Resolved binaries:")
+for k, v in resolved.items():
+    print(f"  {k} -> {v}")
+'@
+
+          $tempPy = "bench/resolve_binaries.py"
+          $script | Out-File -FilePath $tempPy -Encoding utf8 -Force
+          python $tempPy
+          Remove-Item $tempPy -Force -ErrorAction SilentlyContinue
 
       - name: Download Whisper base and large models
         shell: pwsh
         run: |
-          python - <<'PY'
-          import os
-          import pathlib
-          import urllib.request
+          $script = @'
+import os
+import pathlib
+import urllib.request
 
-          base_url = os.environ["HF_WHISPER_BASE_URL"].rstrip("/")
-          out = pathlib.Path("bench/models/whisper")
-          out.mkdir(parents=True, exist_ok=True)
+base_url = os.environ["HF_WHISPER_BASE_URL"].rstrip("/")
+out = pathlib.Path("bench/models/whisper")
+out.mkdir(parents=True, exist_ok=True)
 
-          models = ["ggml-base.bin", "ggml-large-v3.bin"]
-          for m in models:
-              target = out / m
-              if target.exists() and target.stat().st_size > 1_000_000:
-                  print(f"Model already present: {m}")
-                  continue
+models = ["ggml-base.bin", "ggml-large-v3.bin"]
+for m in models:
+    target = out / m
+    if target.exists() and target.stat().st_size > 1_000_000:
+        print(f"Model already present: {m}")
+        continue
 
-              url = f"{base_url}/{m}"
-              print(f"Downloading {url}")
-              req = urllib.request.Request(url, headers={"User-Agent": "speakshift-benchmark-workflow"})
-              with urllib.request.urlopen(req) as resp, open(target, "wb") as f:
-                  f.write(resp.read())
+    url = f"{base_url}/{m}"
+    print(f"Downloading {url}")
+    req = urllib.request.Request(url, headers={"User-Agent": "speakshift-benchmark-workflow"})
+    with urllib.request.urlopen(req) as resp, open(target, "wb") as f:
+        f.write(resp.read())
 
-          print("Whisper models ready")
-          PY
+print("Whisper models ready")
+'@
+
+          $tempPy = "bench/download_whisper.py"
+          $script | Out-File -FilePath $tempPy -Encoding utf8 -Force
+          python $tempPy
+          Remove-Item $tempPy -Force -ErrorAction SilentlyContinue
 
       - name: Download benchmark audio from release tag
         shell: pwsh
@@ -323,113 +343,118 @@ jobs:
           BENCH_AUDIO_TAG: ${{ github.event.inputs.bench_audio_tag }}
           BENCH_AUDIO_ASSET: ${{ github.event.inputs.bench_audio_asset }}
         run: |
-          python - <<'PY'
-          import json
-          import os
-          import pathlib
-          import subprocess
-          import urllib.parse
-          import urllib.request
+          $script = @'
+import json
+import os
+import pathlib
+import subprocess
+import urllib.parse
+import urllib.request
 
-          repo = os.environ["RELEASE_REPO"]
-          tag = (os.environ.get("BENCH_AUDIO_TAG") or "bench_audio").strip()
-          wanted_asset = (os.environ.get("BENCH_AUDIO_ASSET") or "").strip()
+repo = os.environ["RELEASE_REPO"]
+tag = (os.environ.get("BENCH_AUDIO_TAG") or "bench_audio").strip()
+wanted_asset = (os.environ.get("BENCH_AUDIO_ASSET") or "").strip()
 
-          api = f"https://api.github.com/repos/{repo}/releases/tags/{urllib.parse.quote(tag)}"
-          headers = {
-              "Accept": "application/vnd.github+json",
-              "User-Agent": "speakshift-benchmark-workflow",
-          }
-          token = os.environ.get("GH_TOKEN")
-          if token:
-              headers["Authorization"] = f"Bearer {token}"
+api = f"https://api.github.com/repos/{repo}/releases/tags/{urllib.parse.quote(tag)}"
+headers = {
+    "Accept": "application/vnd.github+json",
+    "User-Agent": "speakshift-benchmark-workflow",
+}
+token = os.environ.get("GH_TOKEN")
+if token:
+    headers["Authorization"] = f"Bearer {token}"
 
-          req = urllib.request.Request(api, headers=headers)
-          with urllib.request.urlopen(req) as resp:
-              release = json.loads(resp.read().decode("utf-8"))
+req = urllib.request.Request(api, headers=headers)
+with urllib.request.urlopen(req) as resp:
+    release = json.loads(resp.read().decode("utf-8"))
 
-          audio_exts = (".wav", ".mp3", ".m4a", ".flac", ".ogg", ".opus", ".aac", ".mp4", ".mkv", ".webm", ".mov")
-          assets = release.get("assets", [])
+audio_exts = (".wav", ".mp3", ".m4a", ".flac", ".ogg", ".opus", ".aac", ".mp4", ".mkv", ".webm", ".mov")
+assets = release.get("assets", [])
 
-          candidates = []
-          for a in assets:
-              name = (a.get("name") or "")
-              lower = name.lower()
-              if lower.endswith(audio_exts):
-                  candidates.append(a)
+candidates = []
+for a in assets:
+    name = (a.get("name") or "")
+    lower = name.lower()
+    if lower.endswith(audio_exts):
+        candidates.append(a)
 
-          if wanted_asset:
-              selected = next((a for a in candidates if (a.get("name") or "") == wanted_asset), None)
-              if not selected:
-                  available = "\n".join(sorted((a.get("name") or "") for a in candidates))
-                  raise SystemExit(f"Requested bench_audio_asset not found: {wanted_asset}\nAvailable audio assets:\n{available}")
-          else:
-              # Prefer names that explicitly look like benchmark content, then larger assets.
-              def sort_key(a):
-                  name = (a.get("name") or "").lower()
-                  score = 0
-                  if "bench" in name:
-                      score -= 10
-                  if "1h" in name or "1hr" in name or "60min" in name:
-                      score -= 8
-                  if "audio" in name:
-                      score -= 5
-                  size = int(a.get("size") or 0)
-                  return (score, -size, name)
+if wanted_asset:
+    selected = next((a for a in candidates if (a.get("name") or "") == wanted_asset), None)
+    if not selected:
+        available = "\n".join(sorted((a.get("name") or "") for a in candidates))
+        raise SystemExit(f"Requested bench_audio_asset not found: {wanted_asset}\nAvailable audio assets:\n{available}")
+else:
+    # Prefer names that explicitly look like benchmark content, then larger assets.
+    def sort_key(a):
+        name = (a.get("name") or "").lower()
+        score = 0
+        if "bench" in name:
+            score -= 10
+        if "1h" in name or "1hr" in name or "60min" in name:
+            score -= 8
+        if "audio" in name:
+            score -= 5
+        size = int(a.get("size") or 0)
+        return (score, -size, name)
 
-              if not candidates:
-                  all_names = "\n".join(sorted((a.get("name") or "") for a in assets))
-                  raise SystemExit(f"No audio assets found in release tag '{tag}'. Assets:\n{all_names}")
-              selected = sorted(candidates, key=sort_key)[0]
+    if not candidates:
+        all_names = "\n".join(sorted((a.get("name") or "") for a in assets))
+        raise SystemExit(f"No audio assets found in release tag '{tag}'. Assets:\n{all_names}")
+    selected = sorted(candidates, key=sort_key)[0]
 
-          out_dir = pathlib.Path("bench/work")
-          out_dir.mkdir(parents=True, exist_ok=True)
+out_dir = pathlib.Path("bench/work")
+out_dir.mkdir(parents=True, exist_ok=True)
 
-          name = selected.get("name")
-          url = selected.get("browser_download_url")
-          if not name or not url:
-              raise SystemExit("Selected bench audio asset is missing required fields")
+name = selected.get("name")
+url = selected.get("browser_download_url")
+if not name or not url:
+    raise SystemExit("Selected bench audio asset is missing required fields")
 
-          downloaded = out_dir / name
-          print(f"Downloading benchmark audio asset: {name}")
-          req = urllib.request.Request(url, headers={"User-Agent": "speakshift-benchmark-workflow"})
-          with urllib.request.urlopen(req) as resp, open(downloaded, "wb") as f:
-              f.write(resp.read())
+downloaded = out_dir / name
+print(f"Downloading benchmark audio asset: {name}")
+req = urllib.request.Request(url, headers={"User-Agent": "speakshift-benchmark-workflow"})
+with urllib.request.urlopen(req) as resp, open(downloaded, "wb") as f:
+    f.write(resp.read())
 
-          final_path = downloaded
-          if downloaded.suffix.lower() != ".wav":
-              ffmpeg = os.environ.get("FFMPEG_BIN")
-              if not ffmpeg:
-                  raise SystemExit(f"Benchmark audio is not WAV ({downloaded.name}) and FFMPEG_BIN is unavailable for conversion")
+final_path = downloaded
+if downloaded.suffix.lower() != ".wav":
+    ffmpeg = os.environ.get("FFMPEG_BIN")
+    if not ffmpeg:
+        raise SystemExit(f"Benchmark audio is not WAV ({downloaded.name}) and FFMPEG_BIN is unavailable for conversion")
 
-              wav_target = out_dir / "bench_input.wav"
-              cmd = [
-                  ffmpeg,
-                  "-hide_banner",
-                  "-loglevel",
-                  "error",
-                  "-y",
-                  "-i",
-                  str(downloaded),
-                  "-ac",
-                  "1",
-                  "-ar",
-                  "16000",
-                  "-c:a",
-                  "pcm_s16le",
-                  str(wav_target),
-              ]
-              print("Converting benchmark audio to 16k mono WAV")
-              subprocess.run(cmd, check=True)
-              final_path = wav_target
+    wav_target = out_dir / "bench_input.wav"
+    cmd = [
+        ffmpeg,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-i",
+        str(downloaded),
+        "-ac",
+        "1",
+        "-ar",
+        "16000",
+        "-c:a",
+        "pcm_s16le",
+        str(wav_target),
+    ]
+    print("Converting benchmark audio to 16k mono WAV")
+    subprocess.run(cmd, check=True)
+    final_path = wav_target
 
-          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as f:
-              f.write(f"BENCH_AUDIO_PATH={str(final_path.resolve())}\n")
-              f.write(f"BENCH_AUDIO_ASSET_NAME={name}\n")
-              f.write(f"BENCH_AUDIO_TAG={tag}\n")
+with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as f:
+    f.write(f"BENCH_AUDIO_PATH={str(final_path.resolve())}\n")
+    f.write(f"BENCH_AUDIO_ASSET_NAME={name}\n")
+    f.write(f"BENCH_AUDIO_TAG={tag}\n")
 
-          print(f"Benchmark audio ready: {final_path}")
-          PY
+print(f"Benchmark audio ready: {final_path}")
+'@
+
+          $tempPy = "bench/download_audio.py"
+          $script | Out-File -FilePath $tempPy -Encoding utf8 -Force
+          python $tempPy
+          Remove-Item $tempPy -Force -ErrorAction SilentlyContinue
 
       - name: Benchmark transcription (Whisper base and large)
         shell: pwsh
@@ -469,62 +494,67 @@ jobs:
         env:
           NLLB_VARIANTS: ${{ github.event.inputs.nllb_variants }}
         run: |
-          python - <<'PY'
-          import json
-          import os
-          import pathlib
-          import urllib.parse
-          import urllib.request
+          $script = @'
+import json
+import os
+import pathlib
+import urllib.parse
+import urllib.request
 
-          repo = os.environ["HF_NLLB_REPO"]
-          requested = [v.strip() for v in (os.environ.get("NLLB_VARIANTS") or "").split(",") if v.strip()]
-          if not requested:
-              raise SystemExit("No NLLB variants requested")
+repo = os.environ["HF_NLLB_REPO"]
+requested = [v.strip() for v in (os.environ.get("NLLB_VARIANTS") or "").split(",") if v.strip()]
+if not requested:
+    raise SystemExit("No NLLB variants requested")
 
-          api = f"https://huggingface.co/api/models/{repo}"
-          req = urllib.request.Request(api, headers={"User-Agent": "speakshift-benchmark-workflow"})
-          with urllib.request.urlopen(req) as resp:
-              meta = json.loads(resp.read().decode("utf-8"))
+api = f"https://huggingface.co/api/models/{repo}"
+req = urllib.request.Request(api, headers={"User-Agent": "speakshift-benchmark-workflow"})
+with urllib.request.urlopen(req) as resp:
+    meta = json.loads(resp.read().decode("utf-8"))
 
-          siblings = [s.get("rfilename", "") for s in meta.get("siblings", []) if s.get("rfilename")]
-          out_root = pathlib.Path("bench/models/nllb")
-          out_root.mkdir(parents=True, exist_ok=True)
+siblings = [s.get("rfilename", "") for s in meta.get("siblings", []) if s.get("rfilename")]
+out_root = pathlib.Path("bench/models/nllb")
+out_root.mkdir(parents=True, exist_ok=True)
 
-          available = []
-          for variant in requested:
-              variant_files = [f for f in siblings if f.startswith(f"{variant}/") and not f.endswith("/")]
-              if not variant_files:
-                  print(f"Variant not found in repo, skipping: {variant}")
-                  continue
+available = []
+for variant in requested:
+    variant_files = [f for f in siblings if f.startswith(f"{variant}/") and not f.endswith("/")]
+    if not variant_files:
+        print(f"Variant not found in repo, skipping: {variant}")
+        continue
 
-              variant_root = out_root / variant
-              variant_root.mkdir(parents=True, exist_ok=True)
+    variant_root = out_root / variant
+    variant_root.mkdir(parents=True, exist_ok=True)
 
-              for rel in variant_files:
-                  rel_after = rel[len(variant) + 1 :]
-                  target = variant_root / rel_after
-                  target.parent.mkdir(parents=True, exist_ok=True)
+    for rel in variant_files:
+        rel_after = rel[len(variant) + 1 :]
+        target = variant_root / rel_after
+        target.parent.mkdir(parents=True, exist_ok=True)
 
-                  if target.exists() and target.stat().st_size > 100:
-                      continue
+        if target.exists() and target.stat().st_size > 100:
+            continue
 
-                  url = f"https://huggingface.co/{repo}/resolve/main/{urllib.parse.quote(rel)}?download=true"
-                  print(f"Downloading {variant}: {rel_after}")
-                  req = urllib.request.Request(url, headers={"User-Agent": "speakshift-benchmark-workflow"})
-                  with urllib.request.urlopen(req) as resp, open(target, "wb") as f:
-                      f.write(resp.read())
+        url = f"https://huggingface.co/{repo}/resolve/main/{urllib.parse.quote(rel)}?download=true"
+        print(f"Downloading {variant}: {rel_after}")
+        req = urllib.request.Request(url, headers={"User-Agent": "speakshift-benchmark-workflow"})
+        with urllib.request.urlopen(req) as resp, open(target, "wb") as f:
+            f.write(resp.read())
 
-              if (variant_root / "model.bin").exists() and (variant_root / "tokenizer.json").exists():
-                  available.append(variant)
-              else:
-                  print(f"Variant missing model.bin/tokenizer.json after download: {variant}")
+    if (variant_root / "model.bin").exists() and (variant_root / "tokenizer.json").exists():
+        available.append(variant)
+    else:
+        print(f"Variant missing model.bin/tokenizer.json after download: {variant}")
 
-          work_dir = pathlib.Path("bench/work")
-          work_dir.mkdir(parents=True, exist_ok=True)
-          (work_dir / "nllb_available.txt").write_text("\n".join(available), encoding="utf-8")
+work_dir = pathlib.Path("bench/work")
+work_dir.mkdir(parents=True, exist_ok=True)
+(work_dir / "nllb_available.txt").write_text("\n".join(available), encoding="utf-8")
 
-          print(f"Available variants: {available}")
-          PY
+print(f"Available variants: {available}")
+'@
+
+          $tempPy = "bench/download_nllb.py"
+          $script | Out-File -FilePath $tempPy -Encoding utf8 -Force
+          python $tempPy
+          Remove-Item $tempPy -Force -ErrorAction SilentlyContinue
 
       - name: Benchmark translation (NLLB variants)
         shell: pwsh
