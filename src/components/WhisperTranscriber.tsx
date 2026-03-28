@@ -24,7 +24,11 @@ import { open, save } from '@tauri-apps/plugin-dialog';
 import { writeFile } from '@tauri-apps/plugin-fs';
 import { useVirtualizer } from '@tanstack/react-virtual';
 
-const MEDIA_FILE_EXTENSIONS = ["mp3", "wav", "m4a", "ogg", "flac", "mp4", "mkv", "webm", "mov"];
+const MEDIA_FILE_EXTENSIONS = [
+  "mp3", "wav", "m4a", "ogg", "flac", "aac", "opus", "wma", "aif", "aiff",
+  "mp4", "mkv", "webm", "mov", "avi", "m4v", "wmv", "mpeg", "mpg", "3gp",
+];
+const MAX_ACCEPTED_FILE_SIZE_MB = 8192;
 
 const MIME_BY_EXTENSION: Record<string, string> = {
   mp3: "audio/mpeg",
@@ -32,10 +36,21 @@ const MIME_BY_EXTENSION: Record<string, string> = {
   m4a: "audio/mp4",
   ogg: "audio/ogg",
   flac: "audio/flac",
+  aac: "audio/aac",
+  opus: "audio/opus",
+  wma: "audio/x-ms-wma",
+  aif: "audio/aiff",
+  aiff: "audio/aiff",
   mp4: "video/mp4",
   mkv: "video/x-matroska",
   webm: "video/webm",
   mov: "video/quicktime",
+  avi: "video/x-msvideo",
+  m4v: "video/x-m4v",
+  wmv: "video/x-ms-wmv",
+  mpeg: "video/mpeg",
+  mpg: "video/mpeg",
+  "3gp": "video/3gpp",
 };
 
 const inferMimeFromFileName = (name: string): string => {
@@ -174,6 +189,15 @@ export default function WhisperTranscriber({ file, initialFilePath = null, initi
       sizeMB = (await invoke<number>("get_file_size", { path })) / (1024 * 1024);
     } catch { }
 
+    if (sizeMB > MAX_ACCEPTED_FILE_SIZE_MB) {
+      setError("Selected file is too large (over 8GB). Please choose a smaller file.");
+      setSelectedFile(null);
+      setSelectedFilePath(null);
+      setSelectedFileName("No file selected");
+      showToast("File exceeds 8GB limit", "error");
+      return;
+    }
+
     setSelectedFilePath(path);
     setSelectedFileName(name);
     setFileSizeMB(sizeMB);
@@ -185,6 +209,16 @@ export default function WhisperTranscriber({ file, initialFilePath = null, initi
 
   useEffect(() => {
     if (!file) return;
+
+    if (file.size / (1024 * 1024) > MAX_ACCEPTED_FILE_SIZE_MB) {
+      setError("Selected file is too large (over 8GB). Please choose a smaller file.");
+      setSelectedFile(null);
+      setSelectedFilePath(null);
+      setSelectedFileName("No file selected");
+      showToast("File exceeds 8GB limit", "error");
+      return;
+    }
+
     setSelectedFile(file);
     setSelectedFileName(file.name);
     setFileSizeMB(file.size / (1024 * 1024));
@@ -257,6 +291,15 @@ export default function WhisperTranscriber({ file, initialFilePath = null, initi
     const ext = droppedFile.name.split(".").pop()?.toLowerCase() || "";
     if (!MEDIA_FILE_EXTENSIONS.includes(ext)) {
       setError("Please drop an audio or video file");
+      return;
+    }
+
+    if (droppedFile.size / (1024 * 1024) > MAX_ACCEPTED_FILE_SIZE_MB) {
+      setError("Selected file is too large (over 8GB). Please choose a smaller file.");
+      setSelectedFile(null);
+      setSelectedFilePath(null);
+      setSelectedFileName("No file selected");
+      showToast("File exceeds 8GB limit", "error");
       return;
     }
 
@@ -555,6 +598,10 @@ export default function WhisperTranscriber({ file, initialFilePath = null, initi
       setError("No valid file path. Please select file.");
       return;
     }
+    if (fileSizeMB > MAX_ACCEPTED_FILE_SIZE_MB) {
+      setError("Selected file is too large (over 8GB). Please choose a smaller file.");
+      return;
+    }
 
     setIsProcessing(true);
     setError(null);
@@ -705,10 +752,10 @@ export default function WhisperTranscriber({ file, initialFilePath = null, initi
           {fileSizeMB > 0 && (
             <div className="mt-6 space-y-4">
               <div
-                className={`p-4 rounded-2xl flex items-center gap-3 border ${sizeWarning?.color === "green" ? "bg-green-900/20 border-green-700 text-green-300" :
-                  sizeWarning?.color === "orange" ? "bg-orange-900/20 border-orange-700 text-orange-300" :
-                    sizeWarning?.color === "yellow" ? "bg-yellow-900/20 border-yellow-700 text-yellow-300" :
-                      "bg-red-900/20 border-red-700 text-red-300"
+                className={`p-4 rounded-2xl flex items-center gap-3 border ${sizeWarning?.color === "green" ? "bg-green-50 border-green-200 text-green-800 dark:bg-green-900/20 dark:border-green-700 dark:text-green-300" :
+                  sizeWarning?.color === "orange" ? "bg-orange-50 border-orange-200 text-orange-800 dark:bg-orange-900/20 dark:border-orange-700 dark:text-orange-300" :
+                    sizeWarning?.color === "yellow" ? "bg-yellow-50 border-yellow-200 text-yellow-800 dark:bg-yellow-900/20 dark:border-yellow-700 dark:text-yellow-300" :
+                      "bg-red-50 border-red-200 text-red-800 dark:bg-red-900/20 dark:border-red-700 dark:text-red-300"
                   }`}
               >
                 {sizeWarning?.color === "green" && <CheckCircle2 className="w-6 h-6" />}
@@ -718,10 +765,10 @@ export default function WhisperTranscriber({ file, initialFilePath = null, initi
                 <p className="text-sm">{sizeWarning?.text}</p>
               </div>
               <div
-                className={`p-4 rounded-2xl flex items-center gap-3 border ${modelCompat.color === "green" ? "bg-green-900/20 border-green-700 text-green-300" :
-                  modelCompat.color === "orange" ? "bg-orange-900/20 border-orange-700 text-orange-300" :
-                    modelCompat.color === "yellow" ? "bg-yellow-900/20 border-yellow-700 text-yellow-300" :
-                      "bg-red-900/20 border-red-700 text-red-300"
+                className={`p-4 rounded-2xl flex items-center gap-3 border ${modelCompat.color === "green" ? "bg-green-50 border-green-200 text-green-800 dark:bg-green-900/20 dark:border-green-700 dark:text-green-300" :
+                  modelCompat.color === "orange" ? "bg-orange-50 border-orange-200 text-orange-800 dark:bg-orange-900/20 dark:border-orange-700 dark:text-orange-300" :
+                    modelCompat.color === "yellow" ? "bg-yellow-50 border-yellow-200 text-yellow-800 dark:bg-yellow-900/20 dark:border-yellow-700 dark:text-yellow-300" :
+                      "bg-red-50 border-red-200 text-red-800 dark:bg-red-900/20 dark:border-red-700 dark:text-red-300"
                   }`}
               >
                 {modelCompat.color === "green" && <CheckCircle2 className="w-6 h-6" />}
@@ -758,13 +805,13 @@ export default function WhisperTranscriber({ file, initialFilePath = null, initi
 
         {/* Language Selection */}
         <div className="mt-6">
-          <label className="block text-sm font-medium text-zinc-300 mb-2">
+          <label className="block text-sm font-medium text-zinc-600 dark:text-zinc-300 mb-2">
             Transcription Language
           </label>
           <select
             value={selectedLanguage}
             onChange={(e) => setSelectedLanguage(e.target.value as LanguageCode)}
-            className="w-full px-4 py-3 bg-zinc-800 border border-zinc-700 rounded-xl text-white focus:outline-none focus:ring-2 focus:ring-pink-500"
+            className="w-full px-4 py-3 bg-white dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-700 rounded-xl text-zinc-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-pink-500"
           >
             {LANGUAGES.map((lang) => (
               <option key={lang.code} value={lang.code}>
@@ -853,21 +900,21 @@ export default function WhisperTranscriber({ file, initialFilePath = null, initi
             className="mt-10 space-y-7"
           >
             {/* Preview Card */}
-            <div className="bg-zinc-900/50 backdrop-blur-sm rounded-3xl border border-zinc-800/70 shadow-xl overflow-hidden">
+            <div className="bg-white dark:bg-zinc-900/50 backdrop-blur-sm rounded-3xl border border-zinc-200 dark:border-zinc-800/70 shadow-xl overflow-hidden">
               {/* Header */}
-              <div className="px-7 pt-6 pb-4 border-b border-zinc-800/50">
+              <div className="px-7 pt-6 pb-4 border-b border-zinc-200 dark:border-zinc-800/50">
                 <div className="flex items-center justify-between gap-4">
                   <div className="flex items-center gap-3">
                     <FileText className="w-6 h-6 text-pink-500" />
-                    <h4 className="text-xl font-semibold text-zinc-100">
+                    <h4 className="text-xl font-semibold text-zinc-900 dark:text-zinc-100">
                       Quick Preview
                     </h4>
                   </div>
-                  <div className="text-sm text-zinc-400 font-medium">
+                  <div className="text-sm text-zinc-600 dark:text-zinc-400 font-medium">
                     {transcription.segments.length} segments
                   </div>
                 </div>
-                <p className="text-sm text-zinc-500 mt-1.5">
+                <p className="text-sm text-zinc-500 dark:text-zinc-500 mt-1.5">
                   First few entries — full version & search in Transcriptions tab
                 </p>
               </div>
@@ -905,10 +952,10 @@ export default function WhisperTranscriber({ file, initialFilePath = null, initi
                           height: `${virtualItem.size}px`,
                           transform: `translateY(${virtualItem.start}px)`,
                         }}
-                        className="group px-1 py-4 border-b border-zinc-800/40 last:border-b-0 hover:bg-zinc-800/30 transition-colors duration-150"
+                        className="group px-1 py-4 border-b border-zinc-200 dark:border-zinc-800/40 last:border-b-0 hover:bg-zinc-100 dark:hover:bg-zinc-800/30 transition-colors duration-150"
                       >
                         {/* Timestamp line */}
-                        <div className="flex items-baseline gap-3 text-xs text-zinc-500 mb-2 font-mono tracking-tight">
+                        <div className="flex items-baseline gap-3 text-xs text-zinc-500 dark:text-zinc-500 mb-2 font-mono tracking-tight">
                           <span>
                             {start} → {end}
                           </span>
@@ -925,7 +972,7 @@ export default function WhisperTranscriber({ file, initialFilePath = null, initi
                           </div>
                           <p className="
                           flex-1 pl-2 border-l-2 border-pink-500/30
-                          leading-[1.68] text-[15.5px] text-zinc-100
+                          leading-[1.68] text-[15.5px] text-zinc-800 dark:text-zinc-100
                           wrap-break-word hyphens-auto
                         ">
                             {seg.text.trim()}
@@ -944,7 +991,7 @@ export default function WhisperTranscriber({ file, initialFilePath = null, initi
                 <select
                   value={exportFormat}
                   onChange={(e) => setExportFormat(e.target.value as ExportFormat)}
-                  className="px-4 py-4 rounded-3xl bg-zinc-800 text-white border border-zinc-700 font-semibold"
+                  className="px-4 py-4 rounded-3xl bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white border border-zinc-300 dark:border-zinc-700 font-semibold"
                 >
                   <option value="srt">SRT</option>
                   <option value="vtt">VTT</option>
@@ -974,7 +1021,7 @@ export default function WhisperTranscriber({ file, initialFilePath = null, initi
                     showToast("Failed to copy text", "error");
                   }
                 }}
-                className="flex-1 bg-zinc-800 py-6 rounded-4xl font-black hover:bg-zinc-700 transition-all disabled:opacity-50"
+                className="flex-1 bg-zinc-900 text-zinc-100 dark:bg-zinc-800 py-6 rounded-4xl font-black hover:bg-zinc-800 dark:hover:bg-zinc-700 transition-all disabled:opacity-50"
                 disabled={copyStatus === "copied"}
               >
                 {copyStatus === "copied" ? (
@@ -991,7 +1038,7 @@ export default function WhisperTranscriber({ file, initialFilePath = null, initi
             </div>
 
             {/* Processed badge */}
-            <div className="text-center text-sm text-green-400 flex items-center justify-center gap-2 pt-3">
+            <div className="text-center text-sm text-green-600 dark:text-green-400 flex items-center justify-center gap-2 pt-3">
               <CheckCircle2 className="w-5 h-5" />
               Processed 100% locally with whisper.cpp
             </div>

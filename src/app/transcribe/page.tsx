@@ -14,7 +14,11 @@ import OnboardingCard from "@/components/OnboardingCard";
 import { open } from "@tauri-apps/plugin-dialog";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
-const MEDIA_FILE_EXTENSIONS = ["mp3", "wav", "m4a", "ogg", "flac", "mp4", "mkv", "webm", "mov"];
+const MEDIA_FILE_EXTENSIONS = [
+  "mp3", "wav", "m4a", "ogg", "flac", "aac", "opus", "wma", "aif", "aiff",
+  "mp4", "mkv", "webm", "mov", "avi", "m4v", "wmv", "mpeg", "mpg", "3gp",
+];
+const MAX_BROWSER_DROP_FILE_BYTES = 8 * 1024 * 1024 * 1024;
 
 const WhisperTranscriber = dynamic(() => import("@/components/WhisperTranscriber"), {
   ssr: false,
@@ -31,7 +35,7 @@ const steps = [
   {
     id: "transcribe-tutorial-2-select-file122",
     title: "Step 2: Select Your File",
-    description: "Drag & drop any audio or video file here, or click the dropzone to browse. Supported formats: MP3, WAV, MP4, M4A, OGG, FLAC, MKV, WEBM, MOV.",
+    description: "Drag & drop any audio or video file here, or click the dropzone to browse. Supported formats include MP3, WAV, FLAC, AAC, OPUS, MP4, MOV, MKV, WEBM, AVI, M4V, WMV and more.",
     imageSrc: "/images/transcribe-dropzone-preview.png",
     buttonText: "Next",
   },
@@ -90,7 +94,12 @@ export default function TranscribePage() {
 
     const ext = droppedFile.name.split(".").pop()?.toLowerCase() || "";
     if (!MEDIA_FILE_EXTENSIONS.includes(ext)) {
-      alert("Please drop an audio or video file (mp3, wav, mp4, etc.)");
+      alert("Please drop a supported audio or video file");
+      return false;
+    }
+
+    if (droppedFile.size > MAX_BROWSER_DROP_FILE_BYTES) {
+      alert("This file is too large (over 8GB). Please choose a smaller file.");
       return false;
     }
 
@@ -167,7 +176,7 @@ export default function TranscribePage() {
             if (!path) return;
 
             if (!isSupportedMediaPath(path)) {
-              alert("Please drop an audio or video file (mp3, wav, mp4, etc.)");
+              alert("Please drop a supported audio or video file");
               return;
             }
 
@@ -226,7 +235,7 @@ export default function TranscribePage() {
         title: "Select Audio or Video File",
         filters: [{
           name: "Audio & Video",
-          extensions: ["mp3", "wav", "m4a", "ogg", "flac", "mp4", "mkv", "webm", "mov"],
+          extensions: MEDIA_FILE_EXTENSIONS,
         }],
         multiple: false,
         directory: false,
@@ -309,7 +318,7 @@ export default function TranscribePage() {
                   {isDragOver ? "Drop now!" : t("Drop your audio or video")}
                 </p>
                 <p className="text-lg text-zinc-500 dark:text-zinc-400 font-medium">
-                  MP3, WAV, MP4, M4A, OGG, FLAC, MKV, WEBM {t("up to 500MB")}
+                  MP3, WAV, FLAC, AAC, OPUS, MP4, MOV, MKV, WEBM, AVI, M4V, WMV • {t("up to 2GB")}+
                 </p>
               </div>
             </div>

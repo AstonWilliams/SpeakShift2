@@ -73,7 +73,10 @@ export default function CompactFileTranscriber({
                 filters: [
                     {
                         name: "Audio & Video",
-                        extensions: ["mp3", "wav", "m4a", "ogg", "webm", "flac", "mp4", "mov", "mkv"],
+                        extensions: [
+                            "mp3", "wav", "m4a", "ogg", "flac", "aac", "opus", "wma", "aif", "aiff",
+                            "mp4", "mkv", "webm", "mov", "avi", "m4v", "wmv", "mpeg", "mpg", "3gp",
+                        ],
                     },
                 ],
                 multiple: false,

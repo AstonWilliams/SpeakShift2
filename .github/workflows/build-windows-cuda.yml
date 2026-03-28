@@ -39,9 +39,9 @@ jobs:
             src-tauri -> src-tauri/target
 
       - name: Setup CUDA toolkit
-        uses: Jimver/cuda-toolkit@v0.2.24
+        uses: Jimver/cuda-toolkit@v0.2.30
         with:
-          cuda: '13.2.0'
+          cuda: '13.1.0'
 
       - name: Configure Windows build environment
         shell: pwsh
@@ -176,7 +176,7 @@ jobs:
 
       - name: Build Tauri app
         shell: cmd
-        run: call "%VCVARS_BAT%" && npm run tauri build -- --config src-tauri/tauri.windows.conf.json --target %TARGET_TRIPLET%
+        run: call "%VCVARS_BAT%" && npm run tauri build -- --config src-tauri/tauri.windows.conf.json --target %TARGET_TRIPLET% --bundles nsis
 
       - name: Upload artifacts
         if: always()

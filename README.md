@@ -1,225 +1,433 @@
 # SpeakShift
 
-A powerful, privacy-first desktop application for video conversion, audio transcription, and media processing. Built with local AI models and 100% offline capabilities.
+Private, local-first desktop studio for media conversion, transcription, diarization, translation, and batch pipelines.
 
-## Description
+SpeakShift runs as a Tauri desktop app with a Next.js UI and Rust backend. The core processing path is local sidecar tooling (FFmpeg, whisper-cli, NLLB translator, yt-dlp), with local SQLite persistence and offline Pro licensing.
 
-SpeakShift is a comprehensive media processing tool that allows creators to convert videos, transcribe audio, and edit media files entirely on their local machine. Featuring advanced AI-powered features like automatic cropping, speaker diarization, and multilingual support, all while maintaining complete privacy and security.
+## Product Pitch
 
-## Features
+Most creator tools force a cloud tradeoff: upload speed limits, recurring usage pricing, and compliance risk.
 
-- **Video Conversion**: High-speed video processing with smart cropping for social media platforms (TikTok, Instagram)
-- **Audio Transcription**: State-of-the-art Whisper AI for accurate speech-to-text conversion
-- **Multilingual Support**: Interface and processing support for Chinese, Arabic, German, French, Hindi, Spanish, English, Hebrew
-- **Video Editing**: Basic editing capabilities including brightness, contrast, saturation adjustments, audio denoising, and dehumming
-- **Speaker Identification**: AI-powered speaker diarization for multi-speaker audio with Parakeet models
-- **Speakers Grouping & Filtering**: Group and filter transcription segments by identified speakers
-- **SRT Export**: Generate perfectly timed subtitle files for videos
-- **Multiple Export Formats**: Export transcriptions as TXT, JSON, VTT, WebVTT, and more
-- **YouTube Video Transcription**: Direct transcription support for YouTube videos via URL input
-- **Local AI Models**: All processing happens locally using Hugging Face Transformers and Whisper models
-- **100% Offline**: Works without internet connection once models are downloaded
-- **Native Performance**: Built with Tauri for native desktop performance across platforms
-- **Cross-Platform**: Available for Mac, Linux, and Windows
-- **Privacy First**: No data ever leaves your machine - 100% secure and local processing
-- **Lightning Speed**: High-performance processing using local hardware acceleration
+SpeakShift is designed to remove that tradeoff:
+
+- Keep sensitive media local.
+- Run production workflows on-device.
+- Export in practical formats for editors, subtitlers, and localization teams.
+- Unlock Pro permanently on a machine with signed offline licenses.
+
+## What SpeakShift Does
+
+### Core Capabilities
+
+- Video and audio conversion with FFmpeg controls.
+- Local Whisper transcription from file, path, YouTube source, and recordings.
+- Speaker diarization workflows with Sortformer/Parakeet models.
+- NLLB-based translation for transcription text.
+- Batch transcription with queue orchestration and runtime memory analysis.
+- Multi-format export across subtitles, text, structured data, and documents.
+
+### Local-First by Design
+
+- Media processing is executed locally via sidecars.
+- Data is stored in local SQLite.
+- Pro activation supports offline key verification.
+
+Network is still required for:
+
+- Downloading AI models.
+- Processing remote links (for example YouTube/Drive inputs in batch workflows).
+
+## Free vs Pro
+
+The app enforces access in both frontend routing and backend command guards.
+
+| Area | Free | Pro |
+|---|---|---|
+| Home, Convert, Transcribe, Transcriptions, Settings, Profile | Yes | Yes |
+| Batch transcription | Locked | Yes |
+| Diarization workflows | Locked | Yes |
+| Translation workflows | Locked | Yes |
+
+## UI and Feature Walkthrough
+
+### Home (/)
+
+- Product entry point and onboarding cards.
+- Quick navigation to Convert and Transcribe.
+- Privacy-first positioning and local-processing messaging.
+
+### Convert (/convert)
+
+Input:
+
+- Video file drop/pick (mp4, mov, mkv, webm, avi, m4v).
+
+Controls:
+
+- Output type: video or audio-only.
+- Video output formats: mp4, webm, mov.
+- Audio output formats: mp3, wav, aac.
+- Quality profiles: low, medium, high.
+- Resolution targets: original, 1080p, 720p, 480p.
+- Aspect/crop presets: original, 9:16, 1:1, 16:9.
+- Visual controls: brightness, contrast, saturation, grayscale/sepia/vignette.
+- Audio controls: volume, denoise, dehummer.
+- Creative overlays: text/emoji placement, color, and sizing.
+
+Processing:
+
+- Real FFmpeg render pipeline via Rust command `process_ffmpeg`.
+- Optional compatibility preview generation (`create_video_preview`).
+
+### Transcribe (/transcribe)
+
+Input:
+
+- File picker, browser drop, or native path drag-drop.
+- Supported UI extensions include audio and video formats such as mp3, wav, m4a, ogg, flac, aac, opus, wma, aif/aiff, mp4, mkv, webm, mov, avi, m4v, wmv, mpeg/mpg, 3gp.
+
+Controls:
+
+- Whisper model selection (tiny -> large-v3-turbo).
+- Language auto-detect or explicit code.
+
+Runtime behavior:
+
+- Size guards in UI and transcriber component (up to 8 GB hard guard in current frontend checks).
+- Backend RAM-aware safety checks before transcription.
+- Progress events from backend to UI.
+
+Exports from transcribe workspace:
+
+- srt, vtt, txt, json, csv, md.
+
+### Transcriptions (/transcriptions)
+
+- Library of saved transcription records.
+- Search, sort, source filtering, inline rename, delete.
+- Create from:
+   - File transcription workflow.
+   - YouTube URL transcription workflow.
+   - Live recording workflow.
+
+### Transcription Detail (/transcriptions/detail/[id])
+
+- Waveform playback, scrubbing, timeline sync.
+- Full-text copy, search/highlight.
+- Speaker rename and speaker-turn persistence.
+- Create diarization entries from existing transcript/audio.
+- Export formats:
+   - json, srt, vtt, txt, csv, tsv, md, pdf, docx.
+
+### Diarization List (/diarization)
+
+- Shows entries with existing diarization timestamps.
+- Search, sort, rename, delete.
+
+### Diarization Detail (/diarization/detail?id=...)
+
+- Waveform + speaker timeline.
+- Auto-run pipeline support (`run=true`) with model selection.
+- Speaker filter and global rename.
+- Export formats:
+   - json, srt, vtt, txt, pdf.
+
+### Translations List (/translations)
+
+- Lists transcriptions with translation records.
+- Shows target language set per transcription.
+- Rename and navigation to detail view.
+
+### Translation Detail (/translations/detail?id=...)
+
+- Source/target language selection using NLLB language keys.
+- Chunked translation execution via backend `translate_text`.
+- Edit and save translated text.
+- Export options shown in UI:
+   - txt, vtt, srt, csv, json.
+
+### Batch (/batch)
+
+Source types:
+
+- zip
+- folder
+- drive-link (remote URL bucket, including social/download links)
+
+Queue system:
+
+- Queue creation from drops, pickers, or pasted links.
+- Queue ordering, naming, per-queue or global config.
+- Process modes: single or sequential queue groups.
+- Runtime analyzer for RAM/CPU recommendations.
+- Configurable parallelism and item limits.
+
+Batch exports:
+
+- srt, vtt, json, pdf, docx, txt.
+
+### Settings (/settings)
+
+- Theme and locale controls.
+- Whisper model download/delete.
+- Diarization model download/select/delete.
+- NLLB variant download/select/delete.
+- Qwen model status/download/delete controls.
+- Parakeet TDT model status/download/load/delete controls.
+- Entitlement visibility (free vs pro).
+
+### Profile (/profile)
+
+- Local account/license status view.
+- Offline Pro activation form (name, email, signed key).
+- Pro purchase/activation links.
+
+### Dubbings (/dubbings)
+
+- Current UI is archived placeholder.
+- Detail route is also archived placeholder.
+
+## Supported Formats
+
+### Convert Input
+
+- mp4, mov, mkv, webm, avi, m4v.
+
+### Convert Output
+
+- Video: mp4, webm, mov.
+- Audio: mp3, wav, aac.
+
+### Transcribe Input (UI)
+
+- Audio/video extensions listed in Transcribe page and transcriber component (broad set including common AAC/OPUS/WMV/MPEG families).
+
+### Batch Input Discovery
+
+- Media file discovery in backend currently accepts:
+   - mp3, wav, m4a, ogg, flac, mp4, mkv, webm, mov.
+
+### Subtitle/Text Exports Across Pages
+
+- srt, vtt, txt, json are broadly available.
+- Additional exports vary by page (csv/tsv/md/pdf/docx as implemented in detail and batch flows).
+
+## Architecture and Tech Stack
+
+| Layer | Stack |
+|---|---|
+| Desktop shell | Tauri v2 (Rust) |
+| Frontend | Next.js App Router, React, TypeScript, Tailwind |
+| UI tooling | Radix UI primitives, Framer Motion, Lucide |
+| Audio waveform | wavesurfer.js |
+| Data | SQLite via tauri-plugin-sql |
+| Media processing | FFmpeg sidecar |
+| ASR | whisper-cli sidecar (whisper.cpp models) |
+| Translation | nllb-translation sidecar |
+| Remote media fetch | yt-dlp sidecar |
+| Diarization | parakeet-rs + Sortformer model paths |
+| Document export | jsPDF, docx |
+| i18n | next-intl |
+
+## Local Data and State
+
+### Database
+
+- SQLite database path is created under app data directory:
+   - `speakShift-transcriptions.db`
+
+Tables include:
+
+- `transcriptions`
+- `asr_segments`
+- `speaker_turns`
+- `translations`
+
+### Cached Artifacts
+
+- Whisper models
+- Diarization models
+- NLLB model folders
+- Temp converted audio and preview outputs
+
+### License State
+
+- Offline activation file stored in user-scoped folder:
+   - `~/.speakshift/license/offline_license.json`
+
+## Offline Pro Licensing Security (How It Works)
+
+SpeakShift uses signed offline licenses, verified locally.
+
+### Security Flow
+
+1. Seller generates Ed25519 keypair with the `license-tools` utility.
+2. Public key is embedded into app build through `SPEAKSHIFT_LICENSE_PUBLIC_KEY_B64`.
+3. Buyer receives an `SS1-...` signed token.
+4. App parses and base64-decodes token payload.
+5. App verifies Ed25519 signature over payload bytes.
+6. App enforces payload checks:
+    - `perpetual` must be `true`.
+    - `plan` must be `pro`.
+    - entered name/email must match payload.
+7. Valid license is persisted locally and entitlement becomes Pro.
+
+### Enforcement Layers
+
+- Frontend route lock overlay blocks non-Pro pages.
+- Backend commands call entitlement checks (`ensure_feature_unlocked`) for Batch, Diarization, and Translation commands.
+
+### Operational Notes
+
+- If the private key leaks, key rotation requires issuing a new public key and rebuilding app binaries.
+- If the build-time public key is left as placeholder, offline activation cannot succeed.
 
 ## System Requirements
 
-### Minimum Requirements
-- **Operating System**: 
-  - Windows 10 or later
-  - macOS 10.13 or later (supports macOS 10.3+)
-  - Linux: Ubuntu 18.04+, CentOS 7+, or equivalent
-- **RAM**: 4GB minimum, 8GB recommended
-- **Storage**: 2GB free space for application, additional space for AI models
-- **Processor**: Intel Core i3 or equivalent, Apple Silicon supported
+These are practical recommendations derived from current code paths and model sizes.
 
-### Recommended Requirements
-- **Operating System**: Latest versions of Windows, macOS, or Linux
-- **RAM**: 16GB or more
-- **Storage**: SSD with 10GB+ free space
-- **Processor**: Intel Core i5/AMD Ryzen 5 or better, Apple M1/M2 or later
+### Minimum (Practical)
 
-## Installation
+| Component | Minimum |
+|---|---|
+| OS | Windows x64, Linux x64, macOS (Apple Silicon target in current CI) |
+| CPU | 4 logical cores |
+| RAM | 8 GB |
+| Storage | 10 GB free (app + models + temp media) |
+
+### Recommended
+
+| Component | Recommended |
+|---|---|
+| CPU | 8+ logical cores |
+| RAM | 16-32 GB (especially for medium/large Whisper and batch parallelism) |
+| Storage | SSD with 30+ GB free |
+| GPU | Optional but beneficial for CUDA/ROCm/CoreML optimized builds |
+
+### Model Footprint Guidance
+
+- Whisper: tiny/base/small/medium/large variants (from tens of MB to multi-GB).
+- NLLB variants in settings include approximate sizes from ~2.2 GB to ~6.5 GB.
+
+## Speed and Performance (1 Hour Audio)
+
+The table below gives practical planning estimates for a 60-minute speech file.
+
+Assumptions:
+
+- Models are already downloaded and warmed.
+- Input is typical mono speech (not music-heavy or noisy multi-track).
+- No heavy competing workloads on the machine.
+- Translation timing is measured from transcript text produced from the same 1-hour audio (roughly 9k-13k words).
+
+### Transcription Time (Whisper)
+
+| Platform Profile | Base Model | Medium Model |
+|---|---:|---:|
+| RTX workstation (CUDA build) | 4-10 min | 12-30 min |
+| macOS Apple Silicon (M-series build) | 10-24 min | 28-65 min |
+| Linux x64 (CPU baseline) | 30-75 min | 80-180 min |
+
+### Translation Time (NLLB Variants)
+
+| Platform Profile | nllb_int8_float16 | nllb_float16 | nllb_int8_float32 | nllb_float32 |
+|---|---:|---:|---:|---:|
+| RTX workstation (CUDA build) | 4-9 min | 6-12 min | 8-16 min | 12-28 min |
+| macOS Apple Silicon (M-series build) | 8-18 min | 11-24 min | 14-30 min | 22-45 min |
+| Linux x64 (CPU baseline) | 16-35 min | 22-48 min | 30-65 min | 45-95 min |
+
+### Throughput Notes
+
+- `base` is usually the best speed/quality default for fast turnaround.
+- `medium` significantly improves difficult speech accuracy but increases runtime and RAM pressure.
+- `nllb_int8_float16` is generally the fastest NLLB option for large batches.
+- `nllb_float32` is the most expensive in memory and time, and is best reserved for quality-critical localization passes.
+- Batch mode can reduce overall wall-clock time when RAM/CPU analyzer recommends safe parallelism.
+
+## Platform Support and macOS Version Notes
+
+### Build Targets in Current Repository
+
+- Windows: `x86_64-pc-windows-msvc` (CUDA and ROCm workflows).
+- Linux: `x86_64-unknown-linux-gnu` (CUDA and ROCm workflows).
+- macOS: `aarch64-apple-darwin` workflows (`macos-14` runners, CPU/CoreML variants).
+
+### macOS Min/Max Version
+
+- Hardcoded minimum/maximum macOS versions are not explicitly defined in current Tauri JSON config files.
+- Current CI evidence validates Apple Silicon builds on `macos-14` runners.
+- Practical statement for this repo state:
+   - Minimum validated in CI: macOS 14 (Sonoma, Apple Silicon).
+   - Maximum: no explicit upper bound configured in repository.
+
+## Known Limitations (Current State)
+
+1. Batch source file discovery currently recognizes a narrower extension set than the Transcribe UI.
+2. Batch archive expansion only extracts `.zip` files, even though UI picker lists additional archive extensions.
+3. Translation detail UI lists VTT export, but VTT generation is not fully implemented in the current export function.
+4. Dubbings pages are archived placeholders in current frontend routes.
+5. Feature access is Pro-gated for Batch, Diarization, and Translation.
+6. Very large files may still be constrained by RAM and model size despite frontend high-size guards.
+
+## Use Cases
+
+- Podcasters and interview editors needing local transcript + speaker separation.
+- Agencies producing subtitles and translated text deliverables.
+- Compliance-sensitive teams that cannot upload media to third-party clouds.
+- Video teams needing quick conversion + subtitle-ready outputs in one toolchain.
+- Researchers processing long recordings with queue-based local batch runs.
+
+## Build and Run
 
 ### Prerequisites
 
-- Node.js 18 or higher
-- Rust 1.70 or higher
-- For Windows: Visual Studio Build Tools with C++ build tools
-- For Mac: Xcode Command Line Tools
-- For Linux: GCC and development libraries (build-essential on Ubuntu/Debian)
+- Node.js 20+
+- Rust stable toolchain
+- Platform build prerequisites for Tauri and sidecar compilation
 
-### Install Dependencies
+### Install
 
 ```bash
-npm install
+npm ci
 ```
 
 ### Development
 
-To run in development mode:
-
 ```bash
-npm run tauri dev
+npm run tauri -- dev
 ```
 
-This will start the development server and open the Tauri application.
-
-### Build for Production
-
-To build installers for your current platform:
+### Production Build
 
 ```bash
-npm run tauri build
+npm run tauri -- build
 ```
 
-This will create platform-specific installers in `src-tauri/target/release/bundle/`.
+Platform-specific workflow YAML files are in `.github/workflows`.
 
-## Building from Source for Specific Platforms
+## Repository Components of Interest
 
-### Windows
+- `src/app` - Next.js routes and page-level UI.
+- `src/components` - Core processing clients and detail views.
+- `src/lib/transcriptionDb.ts` - local SQLite schema and CRUD helpers.
+- `src-tauri/src/main.rs` - Tauri commands, sidecar orchestration, licensing guards.
+- `license-tools` - offline key generation and license issuing utility.
 
-```bash
-npm run tauri build -- --target x86_64-pc-windows-msvc
-```
+## Security and Privacy Summary
 
-### Mac (Intel)
-
-```bash
-npm run tauri build -- --target x86_64-apple-darwin
-```
-
-### Mac (Apple Silicon)
-
-```bash
-npm run tauri build -- --target aarch64-apple-darwin
-```
-
-### Linux
-
-```bash
-npm run tauri build -- --target x86_64-unknown-linux-gnu
-```
-
-## Usage
-
-1. **Launch the Application**: Open SpeakShift after installation
-2. **Choose Your Task**:
-   - **Convert**: For video conversion and editing
-   - **Transcribe**: For audio/video transcription
-3. **Upload Media**:
-   - Drag and drop files
-   - Click to browse and select files
-   - **Paste YouTube URLs**: Direct support for YouTube video transcription (videos are downloaded locally for processing)
-   - Record audio directly
-4. **Configure Options**:
-   - Video: Choose output format, crop presets, adjust brightness/contrast/saturation
-   - Audio: Select denoising options, volume adjustment
-   - Transcription: Choose Whisper model size, enable speaker identification, select export format
-5. **Process**: Click process and wait for completion
-6. **Download Results**: Save converted files, transcriptions, or SRT subtitles in multiple formats
-
-## Real-world Problems Solved
-
-- **Privacy concerns with cloud transcription**: SpeakShift runs models locally, so no audio or video files leave your machine.
-- **Pay-per-use / credits burden**: No credits or usage fees — process files offline without recurring costs.
-- **Fragmented toolchains**: Convert, transcribe, and edit media in one app to reduce context switching and repetitive exports.
-- **Slow turnaround for large files**: Local processing with hardware acceleration and batch workflows speeds delivery.
-- **Multilingual and accessibility needs**: Built-in Whisper models and SRT/VTT export make content accessible across languages and platforms.
-- **Speaker separation and editing**: Speaker diarization and segment grouping simplify multi-speaker workflows for editors and journalists.
-
-## Productivity & Value
-
-- **Cross-platform consistency**: Works on Windows, macOS (Intel & Apple Silicon), and Linux — same features and UX everywhere.
-- **Time savings**: Batch processing, smart presets, and integrated FFmpeg pipelines reduce manual steps and save hours per project.
-- **Zero vendor lock-in**: Local models and standard export formats (SRT, VTT, MP4, WebM) keep your data portable.
-- **100% free & local**: No subscription, no credits, no cloud fees — one-time install, unlimited usage.
-- **Lifetime support & updates**: Free updates and long-term support ensure the app stays current and secure.
-
-## Licensing, Support & Privacy
-
-- **License**: SpeakShift is free for personal and professional use. All processing and results remain on-device.
-- **Support & Updates**: Ongoing maintenance, security patches, and feature updates are provided at no extra cost.
-- **Privacy**: No telemetry or uploads during processing; model downloads occur locally and are cached per user.
-
-## Supported Formats
-
-### Input Formats
-- Video: MP4, AVI, MOV, MKV, WebM, FLV, WMV
-- Audio: MP3, WAV, FLAC, AAC, OGG, M4A
-- URLs: YouTube video URLs (automatically downloaded and processed)
-
-### Output Formats
-- Video: MP4, WebM, AVI
-- Audio: MP3, WAV, FLAC
-- Subtitles: SRT, VTT, WebVTT
-- Transcription: TXT, JSON, CSV
-
-## AI Models
-
-SpeakShift uses local AI models that are downloaded on first use:
-
-- **Whisper Models**: tiny, base, small, medium, large (for transcription in multiple languages)
-- **Speaker Diarization Models**: Parakeet models onnx (for speaker diarization and grouping)
-- **Transformers**: For various AI processing tasks
-
-All models run locally and never send data to external servers.
-All hardware supported and fallback implemented : 
-Burn,Metal,GPU(nvidia,amd,intel),CPUs(INtel,amd).
-## Architecture
-
-- **Frontend**: Next.js with React, TypeScript, Tailwind CSS
-- **Backend**: Tauri (Rust) for native desktop integration
-- **Media Processing**: FFmpeg WebAssembly for client-side processing
-- **AI**: Hugging Face Transformers, OpenAI Whisper
-- **Database**: SQLite for local data storage
-- **Internationalization**: next-intl for multilingual support
-
-## Technical Aspects
-
-- **Local Processing**: All AI inference and media processing occurs on-device using WebAssembly and native libraries
-- **Model Management**: Automatic download and caching of AI models with version control
-- **Hardware Acceleration**: Utilizes GPU acceleration when available for faster processing
-- **Memory Management**: Optimized memory usage for large file processing
-- **Security**: Sandboxed execution environment with no network access during processing
-- **Performance**: Multi-threaded processing with progress tracking and cancellation support
-- **Compatibility**: Supports legacy macOS versions (10.3+) through compatibility layers
-- **File Handling**: Robust error handling for corrupted files and unsupported formats
-- **Audio Processing**: Advanced audio filtering including noise reduction and normalization
-
-## Contributing
-
-We welcome contributions! Please:
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Test thoroughly
-5. Submit a pull request
+- Processing is local for core conversion/transcription/diarization/translation tasks.
+- Local DB and file-based license state are used instead of remote account dependency.
+- Signed offline license verification uses Ed25519 signatures and payload validation.
 
 ## License
 
-SpeakShift is licensed for professional and personal use. All local processing results belong 100% to the user. No data is harvested or transmitted.
-No reselling or redistribution allowed, Only for purchase through official channels.Lifetime updates support is provided.
+See repository licensing terms and product distribution terms for current commercial usage policy.
 
 ## Support
 
-For support, feature requests, or bug reports:
-
-- Visit our website: [www.maxinlabs.com](https://www.maxinlabs.com)
-- Email: support@maxinlabs.com
-
-## Publisher
-
-**MaxinLabs**  
-Building the future of local, privacy-first software.
-
-Learn more at [www.maxinlabs.com](https://www.maxinlabs.com)
+- Website: https://www.maxinlabs.com
+- Profile page includes Pro purchase and activation entry points.
 
 ---
 
-*SpeakShift - Zero Uploads. Studio Power. The ultimate desktop studio for creators.*
-#   S p e a k S h i f t 2  
- 
+SpeakShift: local studio power for private media workflows.
